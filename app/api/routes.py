@@ -147,3 +147,72 @@ async def root():
         "docs_url": "/docs",
         "health_url": "/health"
     }
+
+
+@router.get(
+    "/events/simple",
+    response_class=ORJSONResponse,
+    summary="Listar eventos (simple)",
+    description="Lista simple de todos los eventos para visualización rápida"
+)
+async def list_events_simple():
+    """
+    Endpoint simple para listar eventos.
+    
+    Devuelve una lista básica de eventos con información esencial
+    para poder visualizar qué datos hay disponibles en la BD.
+    """
+    try:
+        query = """
+        SELECT 
+            em.ID_Unico_Evento,
+            em.Titulo_ES,
+            em.Titulo_CAT,
+            em.CP_Evento,
+            em.Poblacion_Nombre,
+            em.Es_Gratuito,
+            em.Precio_Euros,
+            eh.Fecha_Inicio,
+            eh.Hora_Inicio,
+            GROUP_CONCAT(DISTINCT c.Nombre_ES SEPARATOR ', ') AS Categorias
+        FROM EVENTOS_MASTER em
+        LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
+        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
+        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
+        WHERE em.Estado = 'ACTIVO'
+        GROUP BY em.ID_Unico_Evento, eh.Fecha_Inicio
+        ORDER BY eh.Fecha_Inicio ASC, em.Titulo_ES ASC
+        LIMIT 200
+        """
+        
+        async with db_service.get_connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(query)
+                rows = await cursor.fetchall()
+                
+                eventos = []
+                for row in rows:
+                    eventos.append({
+                        "id": row[0],
+                        "titulo_es": row[1],
+                        "titulo_cat": row[2],
+                        "cp": row[3],
+                        "poblacion": row[4],
+                        "es_gratuito": bool(row[5]),
+                        "precio": float(row[6]) if row[6] else None,
+                        "fecha": str(row[7]) if row[7] else None,
+                        "hora": str(row[8]) if row[8] else None,
+                        "categorias": row[9] if row[9] else ""
+                    })
+                
+                return {
+                    "eventos": eventos,
+                    "total": len(eventos)
+                }
+                
+    except Exception as e:
+        logger.error(f"Error al listar eventos: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error al obtener eventos"
+        )
