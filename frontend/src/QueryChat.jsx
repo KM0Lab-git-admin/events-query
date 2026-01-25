@@ -46,8 +46,14 @@ function QueryChat({ onAnalysisUpdate }) {
       setResponse(data)
       
       // Pasar análisis al componente padre
+      console.log('DEBUG: data.debug_info =', data.debug_info)
+      console.log('DEBUG: analisis_detallado =', data.debug_info?.analisis_detallado)
+      
       if (onAnalysisUpdate && data.debug_info && data.debug_info.analisis_detallado) {
+        console.log('DEBUG: Llamando onAnalysisUpdate con', data.debug_info.analisis_detallado.length, 'eventos')
         onAnalysisUpdate(data.debug_info.analisis_detallado)
+      } else {
+        console.log('DEBUG: NO se llama onAnalysisUpdate')
       }
     } catch (err) {
       setError(err.message)
