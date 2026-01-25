@@ -11,6 +11,7 @@ from app.models.schemas import QueryRequest, QueryResponse, Evento, ExtractedPar
 from app.services.database import db_service
 from app.services.ai_service import ai_service
 from app.services.query_builder import query_builder
+from app.services.analysis_service import analysis_service
 
 logger = logging.getLogger(__name__)
 
@@ -81,13 +82,28 @@ class EventsService:
         
         # Añadir debug info si se solicita
         if request.debug:
+            # Análisis detallado de eventos
+            analisis_detallado = []
+            if params.conceptos and eventos_raw:
+                conceptos_text = " ".join(params.conceptos)
+                pregunta_embedding = await ai_service.generate_embedding(conceptos_text)
+                
+                # Analizar todos los eventos (incluso los que no pasaron)
+                analisis_detallado = await analysis_service.analyze_batch(
+                    eventos_raw[:20],  # Limitar a 20 para no saturar
+                    pregunta_embedding,
+                    params.conceptos,
+                    umbral=0.4
+                )
+            
             response.debug_info = {
                 "parametros_extraidos": params.model_dump(),
                 "codigos_postales": codigos_postales,
                 "sql_query": query,
                 "sql_params": query_params,
                 "eventos_pre_filtrado": len(eventos_raw),
-                "eventos_post_semantica": len(eventos_filtrados)
+                "eventos_post_semantica": len(eventos_filtrados),
+                "analisis_detallado": analisis_detallado
             }
         
         return response

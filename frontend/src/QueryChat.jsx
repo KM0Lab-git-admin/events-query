@@ -1,6 +1,6 @@
 import { useState } from 'react'
 
-function QueryChat() {
+function QueryChat({ onAnalysisUpdate }) {
   const [pregunta, setPregunta] = useState('')
   const [cpUsuario, setCpUsuario] = useState('08380')
   const [loading, setLoading] = useState(false)
@@ -44,6 +44,11 @@ function QueryChat() {
 
       const data = await response.json()
       setResponse(data)
+      
+      // Pasar análisis al componente padre
+      if (onAnalysisUpdate && data.debug_info && data.debug_info.analisis_detallado) {
+        onAnalysisUpdate(data.debug_info.analisis_detallado)
+      }
     } catch (err) {
       setError(err.message)
       console.error('Error en query:', err)

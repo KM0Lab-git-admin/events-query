@@ -1,7 +1,15 @@
+import { useState } from 'react'
 import EventsList from './EventsList'
 import QueryChat from './QueryChat'
+import AnalysisView from './AnalysisView'
 
 function App() {
+  const [analysisData, setAnalysisData] = useState(null)
+
+  const handleAnalysisUpdate = (analisis) => {
+    setAnalysisData(analisis)
+  }
+
   return (
     <div className="container">
       <header className="header">
@@ -11,7 +19,9 @@ function App() {
 
       <EventsList />
       
-      <QueryChat />
+      <QueryChat onAnalysisUpdate={handleAnalysisUpdate} />
+
+      {analysisData && <AnalysisView analisis={analysisData} />}
 
       <footer style={{ textAlign: 'center', marginTop: '30px', padding: '20px', color: '#7f8c8d', fontSize: '13px' }}>
         <p>Events Query API v1.0 - Fase 1 MVP</p>
