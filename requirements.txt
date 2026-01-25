@@ -1,0 +1,32 @@
+# Events Query API - Fase 1 (MVP)
+# Python 3.11+
+
+# Web Framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+pydantic==2.8.0
+pydantic-settings==2.5.0
+orjson==3.9.15
+
+# Database (Async)
+aiomysql==0.2.0
+cryptography==42.0.5
+
+# AI / LLM
+openai==1.40.0
+tenacity==8.2.3
+
+# Utilities
+python-dotenv==1.0.1
+python-multipart==0.0.9
+
+# Testing
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-cov==4.1.0
+httpx==0.25.2
+
+# Development
+black==24.3.0
+flake8==7.0.0
+mypy==1.9.0
