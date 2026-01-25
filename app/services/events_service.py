@@ -179,6 +179,8 @@ class EventsService:
         """
         eventos = []
         
+        logger.info(f"Iniciando conversión de {len(eventos_raw)} eventos raw a modelos Pydantic")
+        
         # Obtener coordenadas del usuario
         coords_usuario = await db_service.get_coordenadas_cp(cp_usuario)
         
@@ -204,21 +206,30 @@ class EventsService:
                         float(evento_raw['longitud'])
                     )
                 
+                # Validar campos requeridos
+                if not evento_raw.get('id_unico_evento'):
+                    logger.warning(f"Evento sin ID, saltando")
+                    continue
+                
+                if not evento_raw.get('titulo'):
+                    logger.warning(f"Evento {evento_raw.get('id_unico_evento')} sin título, saltando")
+                    continue
+                
                 # Crear modelo Evento
                 evento = Evento(
-                    id_unico_evento=evento_raw['id_unico_evento'],
-                    titulo=evento_raw['titulo'],
+                    id_unico_evento=str(evento_raw['id_unico_evento']),
+                    titulo=str(evento_raw['titulo']),
                     descripcion_corta=evento_raw.get('descripcion_corta'),
                     descripcion_larga=evento_raw.get('descripcion_larga'),
-                    cp_evento=evento_raw['cp_evento'],
-                    poblacion_nombre=evento_raw['poblacion_nombre'],
+                    cp_evento=str(evento_raw.get('cp_evento', '')),
+                    poblacion_nombre=str(evento_raw.get('poblacion_nombre', '')),
                     lugar_nombre=evento_raw.get('lugar_nombre'),
                     direccion_completa=evento_raw.get('direccion_completa'),
-                    fecha_inicio=evento_raw['fecha_inicio'],
+                    fecha_inicio=evento_raw.get('fecha_inicio'),
                     fecha_fin=evento_raw.get('fecha_fin'),
                     hora_inicio=str(evento_raw['hora_inicio']) if evento_raw.get('hora_inicio') else None,
                     hora_fin=str(evento_raw['hora_fin']) if evento_raw.get('hora_fin') else None,
-                    es_gratuito=bool(evento_raw['es_gratuito']),
+                    es_gratuito=bool(evento_raw.get('es_gratuito', False)),
                     precio_euros=float(evento_raw['precio_euros']) if evento_raw.get('precio_euros') else None,
                     categorias=[],  # TODO: Cargar desde relación N:M
                     tags=tags,
@@ -229,10 +240,15 @@ class EventsService:
                 )
                 
                 eventos.append(evento)
+                logger.debug(f"Evento {evento.id_unico_evento} convertido exitosamente")
                 
             except Exception as e:
                 logger.error(f"Error al convertir evento {evento_raw.get('id_unico_evento')}: {e}")
+                logger.error(f"Datos del evento: {evento_raw}")
+                logger.exception("Stack trace completo:")
                 continue
+        
+        logger.info(f"Conversión completada: {len(eventos)} eventos convertidos de {len(eventos_raw)} raw")
         
         return eventos
     

@@ -58,18 +58,18 @@ class Evento(BaseModel):
     """Modelo de un evento."""
     
     id_unico_evento: str
-    titulo: str
+    titulo: str = Field(description="Título del evento")
     descripcion_corta: Optional[str] = None
     descripcion_larga: Optional[str] = None
-    cp_evento: str
-    poblacion_nombre: str
+    cp_evento: str = Field(description="Código postal del evento")
+    poblacion_nombre: str = Field(description="Nombre de la población")
     lugar_nombre: Optional[str] = None
     direccion_completa: Optional[str] = None
-    fecha_inicio: date
+    fecha_inicio: Optional[date] = None
     fecha_fin: Optional[date] = None
     hora_inicio: Optional[str] = None
     hora_fin: Optional[str] = None
-    es_gratuito: bool
+    es_gratuito: bool = Field(description="Indica si el evento es gratuito")
     precio_euros: Optional[float] = None
     categorias: List[str] = Field(default_factory=list)
     tags: List[str] = Field(default_factory=list)
