@@ -202,12 +202,19 @@ class EventsService:
                 # Calcular distancia si hay coordenadas
                 distancia_km = None
                 if coords_usuario and evento_raw.get('latitud') and evento_raw.get('longitud'):
-                    distancia_km = self._calculate_distance(
-                        coords_usuario['lat'],
-                        coords_usuario['lng'],
-                        float(evento_raw['latitud']),
-                        float(evento_raw['longitud'])
-                    )
+                    # Convertir todos los valores a float (pueden venir como Decimal desde MySQL)
+                    lat_usuario = float(coords_usuario['lat']) if coords_usuario.get('lat') is not None else None
+                    lng_usuario = float(coords_usuario['lng']) if coords_usuario.get('lng') is not None else None
+                    lat_evento = float(evento_raw['latitud']) if evento_raw.get('latitud') is not None else None
+                    lng_evento = float(evento_raw['longitud']) if evento_raw.get('longitud') is not None else None
+                    
+                    if lat_usuario is not None and lng_usuario is not None and lat_evento is not None and lng_evento is not None:
+                        distancia_km = self._calculate_distance(
+                            lat_usuario,
+                            lng_usuario,
+                            lat_evento,
+                            lng_evento
+                        )
                 
                 # Validar campos requeridos (COMENTADO TEMPORALMENTE PARA DEBUGGING)
                 # if not evento_raw.get('id_unico_evento'):

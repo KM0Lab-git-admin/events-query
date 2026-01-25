@@ -166,7 +166,14 @@ class DatabaseService:
         """
         
         result = await self.execute_query(query, (cp,), fetch_one=True)
-        return result[0] if result else None
+        if result:
+            # Convertir Decimal a float explícitamente
+            coords = result[0]
+            return {
+                'lat': float(coords['lat']) if coords.get('lat') is not None else None,
+                'lng': float(coords['lng']) if coords.get('lng') is not None else None
+            }
+        return None
 
 
 # Instancia global del servicio
