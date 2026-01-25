@@ -7,6 +7,8 @@ function App() {
   const [analysisData, setAnalysisData] = useState(null)
 
   const handleAnalysisUpdate = (analisis) => {
+    console.log('DEBUG App: Recibiendo análisis con', analisis?.length, 'eventos')
+    console.log('DEBUG App: Datos completos =', analisis)
     setAnalysisData(analisis)
   }
 

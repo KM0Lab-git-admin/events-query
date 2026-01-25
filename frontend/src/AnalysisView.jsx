@@ -3,6 +3,9 @@ import { useState } from 'react';
 export default function AnalysisView({ analisis }) {
   const [expandedEvents, setExpandedEvents] = useState(new Set());
 
+  console.log('DEBUG AnalysisView: Recibiendo analisis =', analisis)
+  console.log('DEBUG AnalysisView: analisis.length =', analisis?.length)
+
   if (!analisis || analisis.length === 0) {
     return (
       <div className="analysis-view">
