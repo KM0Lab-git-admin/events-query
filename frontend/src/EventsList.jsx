@@ -14,7 +14,7 @@ function EventsList() {
       setLoading(true)
       setError(null)
       
-      const response = await fetch('/api/events/simple')
+      const response = await fetch('/events/simple')
       
       if (!response.ok) {
         throw new Error('Error al cargar eventos')

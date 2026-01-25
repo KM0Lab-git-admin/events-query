@@ -172,16 +172,16 @@ async def list_events_simple():
             em.Poblacion_Nombre,
             em.Es_Gratuito,
             em.Precio_Euros,
-            eh.Fecha_Inicio,
-            eh.Hora_Inicio,
+            MIN(eh.Fecha_Inicio) as Fecha_Inicio,
+            MIN(eh.Hora_Inicio) as Hora_Inicio,
             GROUP_CONCAT(DISTINCT c.Nombre_ES SEPARATOR ', ') AS Categorias
         FROM EVENTOS_MASTER em
         LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
         LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
         LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
         WHERE em.Estado = 'ACTIVO'
-        GROUP BY em.ID_Unico_Evento, eh.Fecha_Inicio
-        ORDER BY eh.Fecha_Inicio ASC, em.Titulo_ES ASC
+        GROUP BY em.ID_Unico_Evento, em.Titulo_ES, em.Titulo_CAT, em.CP_Evento, em.Poblacion_Nombre, em.Es_Gratuito, em.Precio_Euros
+        ORDER BY Fecha_Inicio ASC, em.Titulo_ES ASC
         LIMIT 200
         """
         
