@@ -180,6 +180,9 @@ class EventsService:
         eventos = []
         
         logger.info(f"Iniciando conversión de {len(eventos_raw)} eventos raw a modelos Pydantic")
+        print(f"\n{'='*80}")
+        print(f"⚙️  INICIANDO CONVERSIÓN: {len(eventos_raw)} eventos raw")
+        print(f"{'='*80}\n")
         
         # Obtener coordenadas del usuario
         coords_usuario = await db_service.get_coordenadas_cp(cp_usuario)
@@ -206,14 +209,14 @@ class EventsService:
                         float(evento_raw['longitud'])
                     )
                 
-                # Validar campos requeridos
-                if not evento_raw.get('id_unico_evento'):
-                    logger.warning(f"Evento sin ID, saltando")
-                    continue
-                
-                if not evento_raw.get('titulo'):
-                    logger.warning(f"Evento {evento_raw.get('id_unico_evento')} sin título, saltando")
-                    continue
+                # Validar campos requeridos (COMENTADO TEMPORALMENTE PARA DEBUGGING)
+                # if not evento_raw.get('id_unico_evento'):
+                #     logger.warning(f"Evento sin ID, saltando")
+                #     continue
+                # 
+                # if not evento_raw.get('titulo'):
+                #     logger.warning(f"Evento {evento_raw.get('id_unico_evento')} sin título, saltando")
+                #     continue
                 
                 # Crear modelo Evento
                 evento = Evento(
@@ -241,14 +244,32 @@ class EventsService:
                 
                 eventos.append(evento)
                 logger.debug(f"Evento {evento.id_unico_evento} convertido exitosamente")
+                print(f"✅ Evento {evento.id_unico_evento} convertido: {evento.titulo[:50] if evento.titulo else 'Sin título'}...")
                 
             except Exception as e:
-                logger.error(f"Error al convertir evento {evento_raw.get('id_unico_evento')}: {e}")
+                error_msg = f"Error al convertir evento {evento_raw.get('id_unico_evento')}: {e}"
+                logger.error(error_msg)
                 logger.error(f"Datos del evento: {evento_raw}")
                 logger.exception("Stack trace completo:")
+                
+                # PRINT para asegurar visibilidad en consola
+                print("=" * 80)
+                print("\u274c ERROR EN CONVERSIÓN DE EVENTO:")
+                print(error_msg)
+                print(f"Tipo de error: {type(e).__name__}")
+                print(f"Datos del evento: {evento_raw}")
+                print("=" * 80)
+                
                 continue
         
         logger.info(f"Conversión completada: {len(eventos)} eventos convertidos de {len(eventos_raw)} raw")
+        
+        print(f"\n{'='*80}")
+        print(f"✅ CONVERSIÓN COMPLETADA:")
+        print(f"   - Eventos raw recibidos: {len(eventos_raw)}")
+        print(f"   - Eventos convertidos exitosamente: {len(eventos)}")
+        print(f"   - Eventos perdidos: {len(eventos_raw) - len(eventos)}")
+        print(f"{'='*80}\n")
         
         return eventos
     
