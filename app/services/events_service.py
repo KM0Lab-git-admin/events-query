@@ -35,16 +35,9 @@ class EventsService:
         params = await ai_service.extract_parameters(request.pregunta, request.cp_usuario)
         logger.info(f"Parámetros extraídos: {params.model_dump()}")
         
-        # Paso 2: Calcular códigos postales en el radio especificado
-        if params.radio_km:
-            codigos_postales = await db_service.get_codigos_postales_in_radius(
-                request.cp_usuario,
-                params.radio_km
-            )
-            logger.info(f"CPs en radio {params.radio_km}km: {len(codigos_postales)} encontrados")
-        else:
-            # Solo el CP del usuario
-            codigos_postales = [request.cp_usuario]
+        # Paso 2: Usar SOLO el código postal del usuario (sin expandir por radio)
+        codigos_postales = [request.cp_usuario]
+        logger.info(f"Usando solo CP del usuario: {codigos_postales}")
         
         # Paso 3: Construir query SQL
         query, query_params = query_builder.build_events_query(codigos_postales, params)
@@ -84,15 +77,17 @@ class EventsService:
         if request.debug:
             # Análisis detallado de eventos
             analisis_detallado = []
-            if params.conceptos and eventos_raw:
-                conceptos_text = " ".join(params.conceptos)
+            if eventos_raw:
+                # Usar conceptos si existen, sino usar la pregunta completa
+                conceptos_para_analisis = params.conceptos if params.conceptos else [request.pregunta]
+                conceptos_text = " ".join(conceptos_para_analisis)
                 pregunta_embedding = await ai_service.generate_embedding(conceptos_text)
                 
                 # Analizar todos los eventos (incluso los que no pasaron)
                 analisis_detallado = await analysis_service.analyze_batch(
                     eventos_raw[:20],  # Limitar a 20 para no saturar
                     pregunta_embedding,
-                    params.conceptos,
+                    conceptos_para_analisis,
                     umbral=0.4
                 )
             

@@ -103,10 +103,9 @@ class QueryBuilder:
                 query += " AND eh.Fecha_Inicio <= %s"
                 query_params.append(params.fecha_fin)
         
-        # Filtro por precio
-        if params.es_gratuito is not None:
-            query += " AND em.Es_Gratuito = %s"
-            query_params.append(params.es_gratuito)
+        # Filtro por precio - solo filtrar si el usuario pidió explícitamente eventos gratuitos
+        if params.es_gratuito is True:
+            query += " AND em.Es_Gratuito = TRUE"
         elif params.precio_max is not None:
             query += " AND (em.Es_Gratuito = TRUE OR em.Precio_Euros <= %s)"
             query_params.append(params.precio_max)
