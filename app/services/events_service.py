@@ -148,17 +148,17 @@ class EventsService:
                 evento['similitud_score'] = 0.3
                 eventos_con_score.append(evento)
         
-        # Filtrar por similitud mínima (0.6)
-        eventos_filtrados = [e for e in eventos_con_score if e['similitud_score'] >= 0.6]
+        # Filtrar por similitud mínima (0.4)
+        eventos_filtrados = [e for e in eventos_con_score if e['similitud_score'] >= 0.4]
         
-        # Si no hay eventos con similitud >= 0.6, devolver los mejores 10
+        # Si no hay eventos con similitud >= 0.4, devolver los mejores 10
         if not eventos_filtrados and eventos_con_score:
             eventos_filtrados = sorted(eventos_con_score, key=lambda x: x['similitud_score'], reverse=True)[:10]
         
         # Ordenar por similitud descendente
         eventos_filtrados.sort(key=lambda x: x['similitud_score'], reverse=True)
         
-        logger.info(f"Búsqueda semántica: {len(eventos_filtrados)} eventos con similitud >= 0.6")
+        logger.info(f"Búsqueda semántica: {len(eventos_filtrados)} eventos con similitud >= 0.4")
         
         return eventos_filtrados
     

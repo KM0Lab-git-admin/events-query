@@ -33,7 +33,7 @@ function QueryChat() {
         body: JSON.stringify({
           pregunta: pregunta,
           cp_usuario: cpUsuario,
-          debug: false
+          debug: true
         })
       })
 
