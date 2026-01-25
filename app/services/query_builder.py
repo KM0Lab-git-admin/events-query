@@ -38,8 +38,8 @@ class QueryBuilder:
                 ELSE em.Titulo_CAT
             END as titulo,
             CASE 
-                WHEN %s = 'es' THEN em.Desc_Corta_ES
-                ELSE em.Desc_Corta_CAT
+                WHEN %s = 'es' THEN em.Desc_Larga_ES
+                ELSE em.Desc_Larga_CAT
             END as descripcion_corta,
             CASE 
                 WHEN %s = 'es' THEN em.Desc_Larga_ES
@@ -48,15 +48,15 @@ class QueryBuilder:
             em.CP_Evento as cp_evento,
             em.Poblacion_Nombre as poblacion_nombre,
             em.Lugar_Nombre as lugar_nombre,
-            em.Direccion_Completa as direccion_completa,
+            em.Direccion_Fisica as direccion_completa,
             eh.Fecha_Inicio as fecha_inicio,
             eh.Fecha_Fin as fecha_fin,
             eh.Hora_Inicio as hora_inicio,
             eh.Hora_Fin as hora_fin,
             em.Es_Gratuito as es_gratuito,
             em.Precio_Euros as precio_euros,
-            em.URL_Evento as url_evento,
-            em.URL_Imagen_Destacada as url_imagen,
+            em.Link_Entradas_Inscripcion as url_evento,
+            em.Imagen_Principal_URL as url_imagen,
             CASE 
                 WHEN %s = 'es' THEN em.Tags_ES
                 ELSE em.Tags_CAT
@@ -65,10 +65,11 @@ class QueryBuilder:
                 WHEN %s = 'es' THEN em.Tags_Embedding_ES
                 ELSE em.Tags_Embedding_CAT
             END as tags_embedding_json,
-            em.Latitud as latitud,
-            em.Longitud as longitud
+            cp.Latitud as latitud,
+            cp.Longitud as longitud
         FROM EVENTOS_MASTER em
         INNER JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
+        INNER JOIN CODIGOS_POSTALES cp ON em.CP_Evento = cp.CP
         WHERE em.Estado = 'ACTIVO'
         """
         

@@ -131,7 +131,7 @@ class DatabaseService:
         """
         query = """
         SELECT 
-            cp2.Codigo_Postal,
+            cp2.CP,
             (6371 * acos(
                 cos(radians(cp1.Latitud)) * 
                 cos(radians(cp2.Latitud)) * 
@@ -141,13 +141,13 @@ class DatabaseService:
             )) AS distancia_km
         FROM CODIGOS_POSTALES cp1
         CROSS JOIN CODIGOS_POSTALES cp2
-        WHERE cp1.Codigo_Postal = %s
+        WHERE cp1.CP = %s
         HAVING distancia_km <= %s
         ORDER BY distancia_km
         """
         
         results = await self.execute_query(query, (cp_origen, radio_km))
-        return [row['Codigo_Postal'] for row in results] if results else []
+        return [row['CP'] for row in results] if results else []
     
     async def get_coordenadas_cp(self, cp: str) -> Optional[Dict[str, float]]:
         """
@@ -162,7 +162,7 @@ class DatabaseService:
         query = """
         SELECT Latitud as lat, Longitud as lng
         FROM CODIGOS_POSTALES
-        WHERE Codigo_Postal = %s
+        WHERE CP = %s
         """
         
         result = await self.execute_query(query, (cp,), fetch_one=True)

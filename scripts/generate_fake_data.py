@@ -186,11 +186,11 @@ async def insert_data(db: DatabaseService):
     for ciudad in CIUDADES:
         await db.execute_query(
             """
-            INSERT INTO CIUDADES (ID_Ciudad, Nombre_Ciudad, Provincia, Comunidad_Autonoma)
-            VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE Nombre_Ciudad=VALUES(Nombre_Ciudad)
+            INSERT INTO CIUDADES (ID_Ciudad, Nombre, Provincia)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE Nombre=VALUES(Nombre)
             """,
-            (ciudad["id"], ciudad["nombre"], ciudad["provincia"], ciudad["comunidad"])
+            (ciudad["id"], ciudad["nombre"], ciudad["provincia"])
         )
     print(f"✓ {len(CIUDADES)} ciudades insertadas")
     
@@ -198,7 +198,7 @@ async def insert_data(db: DatabaseService):
     for cp in CODIGOS_POSTALES:
         await db.execute_query(
             """
-            INSERT INTO CODIGOS_POSTALES (Codigo_Postal, ID_Ciudad, Latitud, Longitud)
+            INSERT INTO CODIGOS_POSTALES (CP, ID_Ciudad, Latitud, Longitud)
             VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE Latitud=VALUES(Latitud), Longitud=VALUES(Longitud)
             """,
@@ -228,19 +228,21 @@ async def insert_data(db: DatabaseService):
         await db.execute_query(
             """
             INSERT INTO EVENTOS_MASTER (
-                ID_Unico_Evento, Titulo_ES, Titulo_CAT, Desc_Corta_ES, Desc_Corta_CAT,
-                CP_Evento, Poblacion_Nombre, Latitud, Longitud,
-                Es_Gratuito, Precio_Euros, Tags_ES, Tags_CAT, Estado
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'ACTIVO')
+                ID_Unico_Evento, Metodo_Ingesta, ID_Usuario_Carga, Fuente_ID,
+                ID_Ciudad, CP_Evento, Poblacion_Nombre, Lugar_Nombre,
+                Idioma_Origen, Titulo_ES, Titulo_CAT, Desc_Larga_ES, Desc_Larga_CAT,
+                Tags_ES, Tags_CAT, Es_Gratuito, Precio_Euros, Requiere_Inscripcion, Estado
+            ) VALUES (%s, 'MANUAL', 'fake_data_generator', 'URL_ESTRUCTURAL', %s, %s, %s, 'Lugar del evento',
+                     'es', %s, %s, %s, %s, %s, %s, %s, %s, FALSE, 'ACTIVO')
             ON DUPLICATE KEY UPDATE Titulo_ES=VALUES(Titulo_ES)
             """,
             (
-                evento["id_unico"], evento["titulo_es"], evento["titulo_cat"],
+                evento["id_unico"],
+                evento["ciudad_id"], evento["cp_evento"], evento["poblacion"],
+                evento["titulo_es"], evento["titulo_cat"],
                 evento["desc_corta_es"], evento["desc_corta_cat"],
-                evento["cp_evento"], evento["poblacion"],
-                evento["lat"], evento["lng"],
-                evento["es_gratuito"], evento["precio"],
-                evento["tags_es"], evento["tags_cat"]
+                evento["tags_es"], evento["tags_cat"],
+                evento["es_gratuito"], evento["precio"]
             )
         )
         
