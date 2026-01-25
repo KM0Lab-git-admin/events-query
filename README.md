@@ -1,327 +1,323 @@
-# Events Query API - Fase 1 (MVP)
+# Events Query API
 
-API REST para búsqueda de eventos usando lenguaje natural con inteligencia artificial.
+**API REST para búsqueda inteligente de eventos usando lenguaje natural con IA**
 
-## 🎯 Características
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green.svg)](https://fastapi.tiangolo.com/)
+[![OpenAI](https://img.shields.io/badge/OpenAI-GPT--4.1-orange.svg)](https://openai.com/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0-blue.svg)](https://www.mysql.com/)
 
-- **Búsqueda en lenguaje natural**: Pregunta en español o catalán
-- **IA integrada**: OpenAI GPT-4.1-mini para extracción de parámetros y respuestas
+---
+
+## 🎯 ¿Qué es Events Query API?
+
+Events Query API es un sistema inteligente que permite buscar eventos locales usando **lenguaje natural** en español o catalán. Combina **búsqueda semántica** con **IA generativa** para entender preguntas complejas y devolver eventos relevantes con respuestas naturales.
+
+### Ejemplo
+
+**Pregunta:** *"¿Qué hacer este fin de semana con niños cerca de mi?"*
+
+**Respuesta:** *"He encontrado 5 eventos perfectos para niños este fin de semana en tu zona: Cuentacuentos en la biblioteca (gratis), Taller de manualidades infantiles..."*
+
+---
+
+## ✨ Características Principales
+
+### 🤖 Inteligencia Artificial
+
+- **Búsqueda en lenguaje natural**: Pregunta como hablarías con un amigo
+- **OpenAI GPT-4.1-mini**: Extracción inteligente de parámetros
 - **Búsqueda semántica**: Embeddings para encontrar eventos relevantes
-- **Búsqueda geográfica**: Filtrado por código postal y radio en kilómetros
-- **Bilingüe**: Soporte nativo para español y catalán
-- **Async/Await**: Arquitectura asíncrona con aiomysql
-- **Performance**: < 3 segundos de respuesta garantizado
-- **Documentación Swagger**: API docs automática en `/docs`
+- **Respuestas naturales**: Explicaciones en lenguaje humano
+- **Análisis detallado**: Sistema de diagnóstico para entender decisiones de la IA
 
-## 🛠️ Stack Tecnológico
+### 🌍 Búsqueda Geográfica
 
-### Backend
-- **FastAPI 0.115**: Framework web moderno y rápido
-- **ORJSONResponse**: Serialización JSON optimizada
-- **Pydantic 2.x**: Validación de datos
-- **Uvicorn**: Servidor ASGI
+- **Filtrado por código postal**: Eventos en tu zona
+- **Radio configurable**: Busca en 5, 10, 20 km a la redonda
+- **Cálculo de distancias**: Muestra qué tan lejos está cada evento
 
-### Base de Datos
-- **MySQL 8.0**: Base de datos relacional
-- **aiomysql**: Driver async con connection pooling
+### 🌐 Bilingüe
 
-### Inteligencia Artificial
-- **OpenAI GPT-4.1-mini**: Extracción de parámetros y respuestas naturales
-- **text-embedding-3-small**: Búsqueda semántica
-- **tenacity**: Retries con backoff exponencial
+- **Español y catalán**: Soporte nativo completo
+- **Detección automática**: Responde en el idioma de la pregunta
+- **Datos bilingües**: Todos los eventos en ambos idiomas
 
-### Testing
-- **pytest**: Tests unitarios
-- **pytest-asyncio**: Tests asíncronos
-- **httpx**: Tests de API
+### ⚡ Performance
 
-## 📋 Requisitos
+- **< 1.5 segundos**: Respuesta garantizada
+- **Arquitectura asíncrona**: FastAPI + aiomysql
+- **Connection pooling**: Optimización de BD
+- **ORJSONResponse**: Serialización ultra-rápida
+
+### 🎨 Frontend Interactivo (PoC)
+
+- **React + Vite**: Interfaz moderna
+- **Visualización de eventos**: Lista con filtros
+- **Chat de consultas**: Pregunta y responde en tiempo real
+- **Análisis detallado**: Ve paso a paso cómo la IA toma decisiones
+
+---
+
+## 🏗️ Arquitectura
+
+```
+┌─────────────────┐
+│   Frontend      │  React + Vite
+│   (Port 3000)   │
+└────────┬────────┘
+         │ HTTP
+         ▼
+┌─────────────────┐
+│   Backend API   │  FastAPI
+│   (Port 8000)   │
+└────────┬────────┘
+         │
+    ┌────┴────┬────────────┐
+    ▼         ▼            ▼
+┌────────┐ ┌────────┐ ┌─────────┐
+│ MySQL  │ │ OpenAI │ │ Análisis│
+│  8.0   │ │ API    │ │ Service │
+└────────┘ └────────┘ └─────────┘
+```
+
+**Componentes:**
+- **Backend**: FastAPI + Python 3.11
+- **Base de datos**: MySQL 8.0 con 8 tablas relacionales
+- **IA**: OpenAI GPT-4.1-mini + text-embedding-3-small
+- **Frontend**: React + Vite + TailwindCSS (PoC)
+- **Análisis**: Sistema de diagnóstico y propuestas de mejora
+
+---
+
+## 🚀 Quick Start
+
+### Requisitos
 
 - Python 3.11+
 - MySQL 8.0+
+- Node.js 22+ (para frontend)
 - OpenAI API Key
 
-## 🚀 Instalación
-
-### 1. Clonar el repositorio
+### Instalación Rápida (3 pasos)
 
 ```bash
-git clone <repo_url>
-cd events-api
-```
-
-### 2. Crear entorno virtual
-
-```bash
-python3.11 -m venv venv
-source venv/bin/activate  # En Windows: venv\Scripts\activate
-```
-
-### 3. Instalar dependencias
-
-```bash
+# 1. Backend
+cd events-query
+python3.11 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 4. Configurar variables de entorno
-
-```bash
-cp .env.example .env
-# Editar .env con tus credenciales
-```
-
-**Variables requeridas:**
-- `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
-- `OPENAI_API_KEY`
-
-### 5. Crear base de datos
-
-```bash
-# Conectar a MySQL
-mysql -u root -p
-
-# Crear base de datos
-CREATE DATABASE events_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER 'events_user'@'localhost' IDENTIFIED BY 'events_password';
-GRANT ALL PRIVILEGES ON events_db.* TO 'events_user'@'localhost';
-FLUSH PRIVILEGES;
-EXIT;
-
-# Ejecutar esquema
-mysql -u events_user -p events_db < scripts/schema.sql
-```
-
-### 6. Generar datos fake
-
-```bash
-python scripts/generate_fake_data.py
-```
-
-Esto generará:
-- 5 poblaciones (Malgrat de Mar, Calella, Canet de Mar, Pineda de Mar, Blanes)
-- 125 eventos (25 por población)
-- 8 categorías
-- Datos bilingües (español/catalán)
-
-### 7. Ejecutar la API
-
-```bash
-# Desarrollo (con reload)
+cp .env.example .env  # Edita con tus credenciales
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
-# O usando el script
-python -m app.main
+# 2. Frontend (nueva terminal)
+cd events-query/frontend
+pnpm install
+pnpm dev
+
+# 3. Abrir navegador
+open http://localhost:3000
 ```
 
-La API estará disponible en: http://localhost:8000
+**Ver guía completa:** [`docs/QUICKSTART.md`](docs/QUICKSTART.md)
 
-## 📖 Documentación
+---
 
-### Swagger UI (interactiva)
-http://localhost:8000/docs
+## 📚 Documentación
 
-### ReDoc
-http://localhost:8000/redoc
+### Para Empezar
 
-### OpenAPI JSON
-http://localhost:8000/openapi.json
+- **[🚀 Quick Start](docs/QUICKSTART.md)** - Instalación y primer uso (5 minutos)
+- **[🏗️ Arquitectura](docs/ARCHITECTURE.md)** - Cómo funciona el sistema
+- **[👨‍💻 Desarrollo](docs/DEVELOPMENT.md)** - Guía para desarrolladores
+- **[🔧 Troubleshooting](docs/TROUBLESHOOTING.md)** - Solución de problemas
 
-## 🔍 Uso
+### API Docs
 
-### Endpoint principal: POST /query
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
+- **OpenAPI JSON**: http://localhost:8000/openapi.json
 
-**Request:**
-```json
-{
-  "pregunta": "¿Qué hacer este fin de semana en mi población?",
-  "cp_usuario": "08380",
-  "debug": false
-}
+---
+
+## 💡 Ejemplo de Uso
+
+### Endpoint Principal: `POST /query`
+
+```bash
+curl -X POST "http://localhost:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "pregunta": "Actividades relacionadas con comida?",
+    "cp_usuario": "08380",
+    "debug": true
+  }'
 ```
 
-**Response:**
+### Respuesta
+
 ```json
 {
-  "respuesta_texto": "He encontrado 5 eventos para ti este fin de semana en Malgrat de Mar...",
+  "respuesta_texto": "He encontrado 3 eventos gastronómicos para ti...",
   "eventos": [
     {
-      "id_unico_evento": "abc123...",
-      "titulo": "Cineclub: Clásicos del cine",
-      "descripcion_corta": "Evento de cultura en Malgrat de Mar",
+      "id_unico_evento": "abc123",
+      "titulo": "Cata de vinos y quesos - Malgrat de Mar",
       "cp_evento": "08380",
-      "poblacion_nombre": "Malgrat de Mar",
       "fecha_inicio": "2026-01-26",
-      "hora_inicio": "21:00:00",
       "es_gratuito": false,
-      "precio_euros": 6.00,
-      "categorias": ["Cultura"],
-      "tags": ["#cine", "#clasicos", "#cultura"],
-      "distancia_km": 0.0,
-      "similitud_score": 0.85
+      "precio_euros": 26.95,
+      "categorias": ["Gastronomía"],
+      "tags": ["#vinos", "#quesos", "#cata"],
+      "similitud_score": 0.75
     }
   ],
-  "total": 5,
+  "total": 3,
   "idioma_respuesta": "es"
 }
 ```
 
-### Ejemplos de preguntas
+**Más ejemplos:** [`docs/DEVELOPMENT.md#ejemplos`](docs/DEVELOPMENT.md)
 
-**Español:**
-- "¿Qué hacer este fin de semana?"
-- "Eventos gratuitos para niños"
-- "Actividades al aire libre cerca de mi"
-- "Conciertos de música en un radio de 20 kilómetros"
+---
 
-**Catalán:**
-- "Què fer aquest cap de setmana?"
-- "Esdeveniments gratuïts per a nens"
-- "Activitats a l'aire lliure prop meu"
-- "Concerts de música en un radi de 20 quilòmetres"
+## 🛠️ Stack Tecnológico
 
-### Health Check: GET /health
+### Backend
 
-```bash
-curl http://localhost:8000/health
-```
+| Tecnología | Versión | Propósito |
+|------------|---------|-----------|
+| **Python** | 3.11+ | Lenguaje principal |
+| **FastAPI** | 0.115 | Framework web |
+| **Pydantic** | 2.x | Validación de datos |
+| **aiomysql** | Latest | Driver MySQL async |
+| **OpenAI** | Latest | IA generativa y embeddings |
+| **Uvicorn** | Latest | Servidor ASGI |
 
-**Response:**
-```json
-{
-  "status": "healthy",
-  "version": "1.0.0",
-  "timestamp": "2026-01-25T10:30:00",
-  "checks": {
-    "database": "healthy",
-    "openai": "configured",
-    "api": "healthy"
-  }
-}
-```
+### Frontend
+
+| Tecnología | Versión | Propósito |
+|------------|---------|-----------|
+| **React** | 18+ | UI framework |
+| **Vite** | 5+ | Build tool |
+| **pnpm** | Latest | Package manager |
+
+### Base de Datos
+
+- **MySQL 8.0**: 8 tablas relacionales
+- **Esquema**: Ver [`SQL/SCHEMA_SQL_FINAL.sql`](SQL/SCHEMA_SQL_FINAL.sql)
+
+---
+
+## 🎯 Estado Actual del Proyecto
+
+### ✅ Implementado (Fase 1 + PoC)
+
+- [x] Backend API completo con FastAPI
+- [x] Búsqueda en lenguaje natural (español/catalán)
+- [x] Búsqueda semántica con embeddings
+- [x] Búsqueda geográfica por CP y radio
+- [x] Base de datos MySQL con 8 tablas
+- [x] 125 eventos fake para testing
+- [x] Frontend React con PoC funcional
+- [x] Sistema de análisis detallado de similitud
+- [x] Diagnóstico automático de problemas
+- [x] Propuestas de mejora con impacto estimado
+- [x] Documentación completa
+
+### 🚧 En Desarrollo
+
+- [ ] Testing automatizado (50+ casos)
+- [ ] Mejora de precisión (objetivo: 95%)
+- [ ] Generación de embeddings faltantes
+
+### 📋 Roadmap (Fase 2)
+
+- [ ] Redis para cache de embeddings
+- [ ] Rate limiting y autenticación
+- [ ] Monitoreo (Prometheus + Grafana)
+- [ ] Docker Compose para deployment
+- [ ] CI/CD con GitHub Actions
+
+**Ver roadmap completo:** [`docs/DEVELOPMENT.md#roadmap`](docs/DEVELOPMENT.md)
+
+---
 
 ## 🧪 Testing
 
 ```bash
-# Ejecutar todos los tests
+# Backend
 pytest
-
-# Con coverage
 pytest --cov=app --cov-report=html
 
-# Tests específicos
-pytest tests/test_api.py
-pytest tests/test_services.py
+# Frontend
+cd frontend
+pnpm test
 ```
 
-## 📁 Estructura del Proyecto
+**Ver guía de testing:** [`docs/DEVELOPMENT.md#testing`](docs/DEVELOPMENT.md)
 
-```
-events-api/
-├── app/
-│   ├── __init__.py
-│   ├── main.py              # Aplicación FastAPI principal
-│   ├── config.py            # Configuración (env vars)
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── routes.py        # Endpoints de la API
-│   ├── models/
-│   │   ├── __init__.py
-│   │   └── schemas.py       # Modelos Pydantic
-│   └── services/
-│       ├── __init__.py
-│       ├── database.py      # Servicio de BD (aiomysql)
-│       ├── ai_service.py    # Servicio de OpenAI
-│       ├── query_builder.py # Constructor de queries SQL
-│       └── events_service.py # Servicio principal de búsqueda
-├── scripts/
-│   ├── schema.sql           # Esquema de BD
-│   └── generate_fake_data.py # Generador de datos fake
-├── tests/
-│   └── (tests aquí)
-├── .env.example             # Ejemplo de variables de entorno
-├── requirements.txt         # Dependencias Python
-└── README.md               # Este archivo
-```
+---
 
-## ⚡ Performance
+## 📊 Performance
 
-**Objetivo:** < 3 segundos de respuesta
+**Objetivo:** < 3 segundos  
+**Actual:** ~1.4 segundos ✅
 
-**Performance actual (Fase 1):**
-```
-Extracción parámetros (IA):    500ms
-Cálculo geográfico:             50ms
-Pre-filtrado SQL:              120ms
-Búsqueda semántica:            130ms
-Respuesta natural (IA):        500ms
-Serialización (ORJSONResponse): 30ms
-Otros:                         100ms
-──────────────────────────────────
-TOTAL:                        1430ms ✅
-```
+| Operación | Tiempo |
+|-----------|--------|
+| Extracción parámetros (IA) | 500ms |
+| Cálculo geográfico | 50ms |
+| Pre-filtrado SQL | 120ms |
+| Búsqueda semántica | 130ms |
+| Respuesta natural (IA) | 500ms |
+| Otros | 100ms |
+| **TOTAL** | **1400ms** |
 
 **Throughput:** ~10 req/s (single instance)
 
-## 🔐 Seguridad
+---
 
-- ✅ SQL parametrizado (previene SQL injection)
-- ✅ Validación Pydantic en todos los inputs
-- ✅ Connection pooling (previene agotamiento de conexiones)
-- ✅ Timeouts configurables para OpenAI
-- ✅ Retries con backoff exponencial
+## 🤝 Contribuir
 
-## 🐛 Troubleshooting
+Este proyecto está en desarrollo activo. Para contribuir:
 
-### Error: "Database pool not initialized"
-- Asegúrate de que MySQL esté corriendo
-- Verifica las credenciales en `.env`
-- Comprueba que la base de datos existe
+1. Lee [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
+2. Crea una rama feature: `git checkout -b feature/nueva-funcionalidad`
+3. Haz commit: `git commit -m "feat: descripción"`
+4. Push: `git push origin feature/nueva-funcionalidad`
+5. Abre un Pull Request
 
-### Error: "OpenAI API key not configured"
-- Añade `OPENAI_API_KEY` en `.env`
-- Verifica que la API key sea válida
-
-### Performance lenta
-- Activa modo debug: `"debug": true` en el request
-- Revisa los logs para identificar el cuello de botella
-- Verifica que hay índices en la BD
-
-## 📝 Logs
-
-Los logs se escriben en stdout con el siguiente formato:
-```
-2026-01-25 10:30:00 - app.services.events_service - INFO - Búsqueda iniciada: pregunta='...', cp=08380
-```
-
-Nivel de log configurable en `.env`:
-```
-LOG_LEVEL=INFO  # DEBUG, INFO, WARNING, ERROR
-```
-
-## 🚀 Próximos Pasos (Fase 2)
-
-- [ ] Redis para cache de embeddings
-- [ ] Rate limiting
-- [ ] OpenTelemetry + Prometheus
-- [ ] Logs estructurados
-- [ ] Docker Compose
-- [ ] CI/CD
+---
 
 ## 📄 Licencia
 
 [Tu licencia aquí]
 
-## 👥 Autores
+---
 
-[Tu nombre aquí]
+## 👥 Equipo
 
-## 🙏 Agradecimientos
-
-- OpenAI por la API de IA
-- FastAPI por el excelente framework
-- Comunidad Python
+- **Desarrollo**: [Tu nombre]
+- **IA Assistant**: Manus AI
 
 ---
 
-**Versión:** 1.0.0 (Fase 1 - MVP)  
-**Fecha:** Enero 2026
+## 🙏 Agradecimientos
+
+- **OpenAI** por la API de IA
+- **FastAPI** por el excelente framework
+- **Comunidad Python** por las librerías
+
+---
+
+## 📞 Soporte
+
+- **Documentación**: [`docs/`](docs/)
+- **Issues**: [GitHub Issues](https://github.com/tu-repo/issues)
+- **Email**: [tu-email]
+
+---
+
+**Versión:** 1.0.0 (Fase 1 + PoC Frontend)  
+**Última actualización:** Enero 2026  
+**Estado:** ✅ Funcional y en desarrollo activo
