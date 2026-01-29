@@ -64,79 +64,76 @@ function QueryChat({ onAnalysisUpdate }) {
   }
 
   return (
-    <div className="section">
-      <h2>🔍 Chat de Consultas en Lenguaje Natural</h2>
+    <div className="chat-panel">
+      <h2 className="chat-title">🔍 Consultas en Lenguaje Natural</h2>
       
-      <form onSubmit={handleSubmit} className="query-form">
+      <form onSubmit={handleSubmit} className="chat-form">
         <input
           type="text"
           placeholder="Ej: ¿Qué hacer este fin de semana?"
           value={pregunta}
           onChange={(e) => setPregunta(e.target.value)}
           disabled={loading}
+          className="chat-input-pregunta"
         />
-        <input
-          type="text"
-          placeholder="CP: 08380"
-          value={cpUsuario}
-          onChange={(e) => setCpUsuario(e.target.value)}
-          disabled={loading}
-          style={{ maxWidth: '150px' }}
-        />
-        <button type="submit" disabled={loading}>
-          {loading ? 'Buscando...' : 'Buscar'}
-        </button>
+        <div className="chat-form-row">
+          <input
+            type="text"
+            placeholder="CP"
+            value={cpUsuario}
+            onChange={(e) => setCpUsuario(e.target.value)}
+            disabled={loading}
+            className="chat-input-cp"
+          />
+          <button type="submit" disabled={loading} className="chat-btn">
+            {loading ? '...' : 'Buscar'}
+          </button>
+        </div>
       </form>
 
       {error && (
-        <div className="error">
+        <div className="chat-error">
           ❌ {error}
         </div>
       )}
 
       {loading && (
-        <div className="loading">
-          ⏳ Procesando tu consulta con OpenAI...
+        <div className="chat-loading">
+          ⏳ Procesando...
         </div>
       )}
 
       {response && (
-        <div className="response-container">
-          <h3 style={{ marginBottom: '15px', color: '#2c3e50' }}>
-            📋 Respuesta de la API:
-          </h3>
-          
-          <div style={{ marginBottom: '20px', padding: '15px', backgroundColor: '#e8f5e9', borderRadius: '4px', borderLeft: '4px solid #4caf50' }}>
-            <strong>Respuesta en lenguaje natural:</strong>
-            <p style={{ marginTop: '8px', lineHeight: '1.6' }}>
-              {response.respuesta_texto}
-            </p>
+        <div className="chat-response">
+          <div className="chat-response-text">
+            <p>{response.respuesta_texto}</p>
           </div>
 
-          <div style={{ marginBottom: '15px' }}>
-            <strong>Eventos encontrados: {response.total}</strong>
+          <div className="chat-response-meta">
+            <strong>{response.total} eventos encontrados</strong>
           </div>
 
-          <details open>
-            <summary style={{ cursor: 'pointer', fontWeight: 'bold', marginBottom: '10px', color: '#2c3e50' }}>
+          <details>
+            <summary className="chat-details-summary">
               Ver JSON completo
             </summary>
-            <pre className="response-json">
+            <pre className="chat-json">
               {JSON.stringify(response, null, 2)}
             </pre>
           </details>
         </div>
       )}
 
-      <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff3cd', borderRadius: '4px', fontSize: '13px' }}>
-        <strong>💡 Ejemplos de preguntas:</strong>
-        <ul style={{ marginTop: '8px', marginLeft: '20px' }}>
-          <li>¿Qué hacer este fin de semana?</li>
-          <li>Eventos gratuitos para niños</li>
-          <li>Actividades de cultura en mi zona</li>
-          <li>Conciertos de música cerca de mí</li>
-        </ul>
-      </div>
+      {!response && !loading && (
+        <div className="chat-examples">
+          <strong>💡 Ejemplos:</strong>
+          <ul>
+            <li>¿Qué hacer este fin de semana?</li>
+            <li>Eventos gratuitos para niños</li>
+            <li>Actividades de cultura</li>
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

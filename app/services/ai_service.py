@@ -3,9 +3,10 @@ Servicio de IA para interactuar con OpenAI.
 Incluye extracción de parámetros, generación de embeddings y respuestas naturales.
 """
 
+import hashlib
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from openai import AsyncOpenAI
 from tenacity import (
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 class AIService:
     """Servicio para interactuar con OpenAI."""
+    
+    # Cache de embeddings en memoria (reduce llamadas a OpenAI en queries repetidas)
+    _embedding_cache: Dict[str, List[float]] = {}
+    _cache_max_size: int = 1000  # Máximo de entradas en cache
     
     def __init__(self):
         self.client = AsyncOpenAI(
@@ -60,7 +65,16 @@ Extrae los siguientes parámetros de la pregunta del usuario:
 3. fecha_inicio y fecha_fin: rango de fechas
 4. radio_km: radio en kilómetros (si menciona "cerca", "alrededores", "a la redonda", usa 20km por defecto)
 5. categorias: lista de categorías (Cultura, Deportes, Ocio, Infantil, Formación, Gastronomía, Música, Naturaleza)
-6. conceptos: lista de conceptos/tags para búsqueda semántica (ej: "niños", "aire libre", "familiar")
+6. conceptos: lista de conceptos para búsqueda semántica.
+   ⚠️ IMPORTANTE: EXPANDE cada concepto con sinónimos y palabras relacionadas en AMBOS idiomas.
+   Ejemplos de expansión:
+   - "ballar/bailar" → ["ballar", "dansa", "ball", "bailar", "baile", "música", "festa", "fiesta", "discoteca"]
+   - "niños/nens" → ["niños", "nens", "infantil", "familia", "familiar", "kids", "pequeños", "petits"]
+   - "comer/menjar" → ["comer", "menjar", "gastronomía", "gastronomia", "comida", "restaurante", "cuina", "cocina"]
+   - "gratis/gratuït" → ["gratis", "gratuito", "gratuït", "free", "sense cost", "sin coste"]
+   - "música" → ["música", "musica", "concierto", "concert", "jazz", "rock", "directo", "directe"]
+   - "deporte/esport" → ["deporte", "esport", "deportivo", "esportiu", "ejercicio", "actividad física"]
+   Genera SIEMPRE al menos 5-8 conceptos expandidos para mejorar la búsqueda.
 7. es_gratuito: true si pide eventos gratuitos
 8. precio_max: precio máximo en euros
 
@@ -105,22 +119,34 @@ Código postal usuario: {cp_usuario}"""
                 conceptos=[pregunta]
             )
     
+    def _get_cache_key(self, text: str) -> str:
+        """Genera una clave de cache para un texto."""
+        return hashlib.md5(text.encode('utf-8')).hexdigest()
+    
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         retry=retry_if_exception_type((Exception,)),
         reraise=True
     )
-    async def generate_embedding(self, text: str) -> List[float]:
+    async def generate_embedding(self, text: str, use_cache: bool = True) -> List[float]:
         """
-        Genera un embedding para un texto.
+        Genera un embedding para un texto, con cache opcional.
         
         Args:
             text: Texto a convertir en embedding
+            use_cache: Si True, usa cache en memoria para queries repetidas
         
         Returns:
             Lista de floats representando el embedding (1536 dimensiones)
         """
+        # Intentar obtener del cache
+        if use_cache:
+            cache_key = self._get_cache_key(text)
+            if cache_key in self._embedding_cache:
+                logger.debug(f"Embedding obtenido de cache (key={cache_key[:8]}...)")
+                return self._embedding_cache[cache_key]
+        
         try:
             response = await self.client.embeddings.create(
                 model=self.embedding_model,
@@ -129,6 +155,15 @@ Código postal usuario: {cp_usuario}"""
             
             embedding = response.data[0].embedding
             logger.debug(f"Embedding generado: {len(embedding)} dimensiones")
+            
+            # Guardar en cache (con límite de tamaño)
+            if use_cache:
+                if len(self._embedding_cache) >= self._cache_max_size:
+                    # Eliminar entrada más antigua (FIFO simple)
+                    oldest_key = next(iter(self._embedding_cache))
+                    del self._embedding_cache[oldest_key]
+                self._embedding_cache[cache_key] = embedding
+                logger.debug(f"Embedding guardado en cache (size={len(self._embedding_cache)})")
             
             return embedding
             
