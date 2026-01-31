@@ -142,7 +142,7 @@ if FRONTEND_DIR.exists():
         Permite que React Router maneje el routing del lado del cliente.
         """
         # Si es una ruta de API conocida, dejar que FastAPI devuelva 404
-        api_prefixes = ("events", "query", "health", "docs", "redoc", "openapi.json")
+        api_prefixes = ("api", "events", "query", "health", "docs", "redoc", "openapi.json")
         if full_path.startswith(api_prefixes):
             return ORJSONResponse(
                 status_code=404,

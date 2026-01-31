@@ -138,13 +138,13 @@ async def health_check() -> HealthResponse:
 
 
 @router.get(
-    "/",
+    "/api/info",
     response_class=ORJSONResponse,
-    summary="Root endpoint",
+    summary="API Info",
     description="Información básica de la API"
 )
-async def root():
-    """Endpoint raíz con información de la API."""
+async def api_info():
+    """Endpoint con información de la API."""
     return {
         "name": settings.app_name,
         "version": settings.app_version,
