@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import settings
 from app.api.routes import router
 from app.services import db_service
+from app.services.seed_service import seed_if_empty
 
 # Ruta al frontend compilado
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
@@ -53,6 +54,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"✗ Error al inicializar esquema: {e}")
         raise
+
+    # Auto-seed: generar datos fake si la BD está vacía (solo primera vez)
+    try:
+        await seed_if_empty()
+    except Exception as e:
+        logger.warning(f"⚠ Error en auto-seed (no crítico): {e}")
+        # No hacer raise - el seed no es crítico para arrancar
 
     # Verificar configuración de OpenAI
     if settings.openai_api_key:
