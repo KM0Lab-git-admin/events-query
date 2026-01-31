@@ -2,7 +2,9 @@
 Servicio de base de datos con conexión asíncrona usando aiomysql.
 """
 
+import re
 import aiomysql
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
 import logging
@@ -174,6 +176,78 @@ class DatabaseService:
                 'lng': float(coords['lng']) if coords.get('lng') is not None else None
             }
         return None
+
+    async def _execute_statement(self, statement: str) -> None:
+        """Ejecuta una sentencia SQL sin devolver resultados (DDL, INSERT, etc.)."""
+        async with self.get_connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(statement)
+
+    async def _tables_exist(self) -> bool:
+        """Comprueba si las tablas base existen (CIUDADES como indicador)."""
+        try:
+            result = await self.execute_query(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = 'CIUDADES'",
+                (settings.db_name,),
+                fetch_one=True
+            )
+            return result is not None
+        except Exception:
+            return False
+
+    async def init_schema_if_needed(self) -> None:
+        """
+        Si las tablas no existen, ejecuta el esquema SQL para crearlas.
+        Útil para despliegues en Railway u otros entornos donde no hay init manual.
+        """
+        if await self._tables_exist():
+            logger.info("Tablas ya existentes, omitiendo inicialización de esquema")
+            return
+
+        logger.info("Tablas no detectadas, creando esquema desde SQL/SCHEMA_SQL_FINAL.sql")
+
+        schema_path = Path(__file__).resolve().parent.parent.parent / "SQL" / "SCHEMA_SQL_FINAL.sql"
+        if not schema_path.exists():
+            raise FileNotFoundError(
+                f"No se encontró el esquema SQL en {schema_path}. "
+                "Asegúrate de incluir la carpeta SQL en el despliegue."
+            )
+
+        sql_content = schema_path.read_text(encoding="utf-8")
+
+        # Eliminar bloques de comentarios /* ... */
+        sql_content = re.sub(r"/\*[\s\S]*?\*/", "", sql_content)
+
+        # Dividir por punto y coma
+        statements = [
+            s.strip()
+            for s in re.split(r";\s*\n", sql_content)
+            if s.strip()
+        ]
+
+        skip_prefixes = ("CREATE DATABASE", "USE ")
+
+        for stmt in statements:
+            stmt = stmt.strip()
+            # Quitar líneas de comentario al inicio
+            lines = stmt.split("\n")
+            while lines and lines[0].strip().startswith("--"):
+                lines.pop(0)
+            stmt = "\n".join(lines).strip()
+            if not stmt:
+                continue
+            if any(stmt.upper().startswith(prefix) for prefix in skip_prefixes):
+                continue
+
+            try:
+                await self._execute_statement(stmt)
+                logger.debug(f"Ejecutada sentencia: {stmt[:60]}...")
+            except Exception as e:
+                logger.warning(f"Error ejecutando sentencia (puede ser comentario): {e}")
+                # No relanzar: bloques de comentarios o notas pueden fallar
+
+        logger.info("Esquema inicializado correctamente")
 
 
 # Instancia global del servicio

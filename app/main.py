@@ -40,7 +40,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"✗ Error al conectar a la base de datos: {e}")
         raise
-    
+
+    # Crear tablas si no existen (útil para Railway y despliegues sin init manual)
+    try:
+        await db_service.init_schema_if_needed()
+    except Exception as e:
+        logger.error(f"✗ Error al inicializar esquema: {e}")
+        raise
+
     # Verificar configuración de OpenAI
     if settings.openai_api_key:
         logger.info("✓ OpenAI API key configurada")
@@ -80,7 +87,7 @@ app = FastAPI(
 # Configurar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"] if settings.is_development else [],  # En producción, especificar dominios
+    allow_origins=["https://km0lab-core.vercel.app/"] if settings.is_development else [],  # En producción, especificar dominios
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
