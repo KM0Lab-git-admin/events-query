@@ -87,7 +87,7 @@ app = FastAPI(
 # Configurar CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://km0lab-core.vercel.app/"] if settings.is_development else [],  # En producción, especificar dominios
+    allow_origins = ["*"],  # En producción, especificar dominios
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
