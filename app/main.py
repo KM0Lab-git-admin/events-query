@@ -3,14 +3,20 @@ Aplicación principal FastAPI - Events Query API.
 """
 
 import logging
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.api.routes import router
 from app.services import db_service
+
+# Ruta al frontend compilado
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 
 # Configurar logging
 logging.basicConfig(
@@ -104,6 +110,56 @@ async def log_requests(request, call_next):
     response = await call_next(request)
     logger.info(f"← {request.method} {request.url.path} - Status: {response.status_code}")
     return response
+
+
+# ============================================
+# Servir Frontend estático (SPA)
+# ============================================
+
+# Montar assets estáticos (JS, CSS, imágenes) si el directorio existe
+if FRONTEND_DIR.exists():
+    # Montar la carpeta assets
+    assets_dir = FRONTEND_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="static-assets")
+    
+    logger.info(f"✓ Frontend estático configurado desde {FRONTEND_DIR}")
+    
+    # Ruta para la raíz - sirve index.html
+    @app.get("/")
+    async def serve_index():
+        """Sirve el index.html del frontend en la raíz."""
+        index_file = FRONTEND_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        return ORJSONResponse(status_code=404, content={"detail": "Frontend not found"})
+    
+    # Ruta catch-all para SPA - debe ir AL FINAL para no bloquear rutas de API
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """
+        Sirve el frontend React para cualquier ruta no manejada por la API.
+        Permite que React Router maneje el routing del lado del cliente.
+        """
+        # Si es una ruta de API conocida, dejar que FastAPI devuelva 404
+        api_prefixes = ("events", "query", "health", "docs", "redoc", "openapi.json")
+        if full_path.startswith(api_prefixes):
+            return ORJSONResponse(
+                status_code=404,
+                content={"detail": "Not Found"}
+            )
+        
+        # Para cualquier otra ruta, servir index.html (SPA)
+        index_file = FRONTEND_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        
+        return ORJSONResponse(
+            status_code=404,
+            content={"detail": "Frontend not found"}
+        )
+else:
+    logger.warning(f"⚠ Frontend no encontrado en {FRONTEND_DIR}")
 
 
 if __name__ == "__main__":
