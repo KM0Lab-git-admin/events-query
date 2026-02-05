@@ -92,6 +92,41 @@ def get_openai_client() -> AsyncOpenAI:
     return openai_client
 
 
+async def validate_openai_api_key() -> bool:
+    """
+    Valida que la API key de OpenAI esté configurada y funcione.
+    Hace una llamada mínima de prueba antes de generar embeddings masivos.
+    Retorna True si todo OK, False si falla.
+    """
+    api_key = settings.openai_api_key
+    if not api_key or api_key.strip() == "":
+        print("\n" + "!" * 60)
+        print("ERROR: OPENAI_API_KEY no está configurada.")
+        print("Configúrala en .env o como variable de entorno.")
+        print("!" * 60)
+        return False
+
+    print("\nValidando API key de OpenAI...")
+    try:
+        client = get_openai_client()
+        response = await client.embeddings.create(
+            model="text-embedding-3-small",
+            input="test"
+        )
+        if response.data and len(response.data[0].embedding) > 0:
+            print("  -> API key válida (test embedding OK)")
+            return True
+        else:
+            print("  -> ERROR: respuesta vacía de OpenAI")
+            return False
+    except Exception as e:
+        print("\n" + "!" * 60)
+        print(f"ERROR: No se pudo conectar a OpenAI: {e}")
+        print("Verifica tu OPENAI_API_KEY y tu conexión a internet.")
+        print("!" * 60)
+        return False
+
+
 async def generate_embedding(text: str) -> List[float]:
     """Genera un embedding para un texto usando OpenAI."""
     client = get_openai_client()
@@ -658,6 +693,13 @@ async def main(clear_existing: bool = True):
     print(f"  - % Recurrentes base (otros): {PORCENTAJE_RECURRENTES_BASE * 100}%")
     print(f"  - Rango de fechas: próximos {DIAS_RANGO_EVENTOS} días")
     
+    # Validar API key de OpenAI ANTES de tocar la BD
+    api_ok = await validate_openai_api_key()
+    if not api_ok:
+        print("\nABORTANDO: No se generarán datos sin una API key válida.")
+        print("Esto evita insertar eventos sin embeddings.")
+        return 1
+
     # Crear servicio de BD
     db = DatabaseService()
     

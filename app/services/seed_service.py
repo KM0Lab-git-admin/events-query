@@ -52,10 +52,20 @@ async def seed_if_empty() -> bool:
         from scripts.generate_fake_data import (
             generate_fake_events,
             add_embeddings_to_events,
+            validate_openai_api_key,
             insert_base_data,
             insert_events,
             DatabaseService
         )
+        
+        # Validar API key ANTES de generar nada
+        api_ok = await validate_openai_api_key()
+        if not api_ok:
+            logger.error(
+                "OPENAI_API_KEY no válida. Seed abortado para evitar "
+                "insertar eventos sin embeddings. Configura la key y reinicia."
+            )
+            return False
         
         # Usar el servicio de BD existente (ya conectado)
         # El script espera una instancia de DatabaseService, usamos db_service
@@ -65,7 +75,7 @@ async def seed_if_empty() -> bool:
         await insert_base_data(db_service)
         
         # 2. Generar eventos fake
-        logger.info("Generando 200 eventos fake...")
+        logger.info("Generando eventos fake (únicos, sin duplicados)...")
         eventos = generate_fake_events()
         logger.info(f"  -> {len(eventos)} eventos generados en memoria")
         
