@@ -50,6 +50,11 @@ const TEXTOS_UI = {
     de: 'de',
     cada: 'cada',
     hastaFecha: 'hasta',
+    semanal: 'Semanal',
+    quincenal: 'Quincenal',
+    mensual: 'Mensual',
+    diario: 'Diario',
+    mesesActivos: 'meses',
     publico: 'Público',
     privado: 'Privado',
     asociacion: 'Asociación',
@@ -92,6 +97,11 @@ const TEXTOS_UI = {
     de: 'de',
     cada: 'cada',
     hastaFecha: 'fins',
+    semanal: 'Setmanal',
+    quincenal: 'Quinzenal',
+    mensual: 'Mensual',
+    diario: 'Diari',
+    mesesActivos: 'mesos',
     publico: 'Públic',
     privado: 'Privat',
     asociacion: 'Associació',
@@ -263,23 +273,55 @@ function EventsList() {
     return tags.map(tag => (typeof tag === 'string' && tag.trim() ? (tag.startsWith('#') ? tag : `#${tag}`) : '')).filter(Boolean)
   }
 
-  /** Recurrencia JSON a texto legible */
+  /** Recurrencia JSON a texto legible y amigable */
   const formatRecurrencia = (recurrencia) => {
     if (!recurrencia) return null
     try {
       const r = typeof recurrencia === 'string' ? JSON.parse(recurrencia) : recurrencia
       const tipo = r.tipo || ''
-      const intervalo = r.intervalo
+      const intervalo = r.intervalo || 1
       const regla = r.regla || {}
       const dias = regla.dias_semana || []
-      const fin = regla.finalizacion?.valor || ''
+      const finValor = regla.finalizacion?.valor || ''
+      const mesesActivos = regla.meses_activos || []
       const horarios = (r.horarios || []).map(h => `${h.inicio || ''}-${h.fin || ''}`).filter(Boolean)
+
       const parts = []
-      if (tipo) parts.push(tipo)
-      if (intervalo) parts.push(`${t.cada} ${intervalo}`)
+
+      // Tipo + intervalo como texto humano (sin redundancia)
+      if (tipo === 'semanal' && intervalo === 1) {
+        parts.push(t.semanal)
+      } else if (tipo === 'semanal' && intervalo === 2) {
+        parts.push(t.quincenal)
+      } else if (tipo === 'quincenal') {
+        parts.push(t.quincenal)
+      } else if (tipo === 'diario') {
+        parts.push(t.diario)
+      } else if (tipo === 'mensual') {
+        parts.push(t.mensual)
+      } else if (tipo) {
+        parts.push(tipo.charAt(0).toUpperCase() + tipo.slice(1))
+      }
+
+      // Días de la semana
       if (dias.length) parts.push(dias.join(', '))
-      if (fin) parts.push(`${t.hastaFecha} ${fin}`)
+
+      // Meses activos (si existen)
+      if (mesesActivos.length) {
+        const locale = idioma === 'ca' ? 'ca-ES' : 'es-ES'
+        const nombres = mesesActivos.map(m => {
+          const d = new Date(2026, m - 1, 1)
+          return d.toLocaleDateString(locale, { month: 'short' })
+        })
+        parts.push(nombres.join(', '))
+      }
+
+      // Fecha de finalización formateada (no ISO crudo)
+      if (finValor) parts.push(`${t.hastaFecha} ${formatearFecha(finValor)}`)
+
+      // Horarios de cada sesión
       if (horarios.length) parts.push(horarios.join('; '))
+
       return parts.join(' · ') || null
     } catch (_) {
       return null
@@ -536,27 +578,44 @@ function EventsList() {
                 <div className="event-card-block">
                   <span className="field-label">{t.fechasHorario}</span>
                   <div className="event-card-details">
-                    <div className="detail-item">
-                      <span className="detail-icon">📅</span>
-                      <span>{t.inicio}: {formatearFecha(evento.fecha_inicio)}{evento.hora_inicio ? ` · ${formatearHora(evento.hora_inicio)}` : ''}</span>
-                    </div>
-                    {(evento.fecha_fin || evento.hora_fin) && (
-                      <div className="detail-item">
-                        <span className="detail-icon">📅</span>
-                        <span>{t.fin}: {evento.fecha_fin ? formatearFecha(evento.fecha_fin) : '—'}{evento.hora_fin ? ` · ${formatearHora(evento.hora_fin)}` : ''}</span>
-                      </div>
-                    )}
-                    {evento.es_recurrente && (
-                      <div className="detail-item">
-                        <span className="detail-icon">🔄</span>
-                        <span>{t.recurrente}</span>
-                      </div>
-                    )}
-                    {formatRecurrencia(evento.recurrencia) && (
-                      <div className="detail-item detail-recurrencia">
-                        <span className="detail-icon">📋</span>
-                        <span>{formatRecurrencia(evento.recurrencia)}</span>
-                      </div>
+                    {evento.es_recurrente ? (
+                      <>
+                        {/* Evento recurrente: rango + patrón de recurrencia */}
+                        <div className="detail-item">
+                          <span className="detail-icon">📅</span>
+                          <span>{t.inicio}: {formatearFecha(evento.fecha_inicio)}</span>
+                        </div>
+                        {evento.fecha_fin && (
+                          <div className="detail-item">
+                            <span className="detail-icon">📅</span>
+                            <span>{t.fin}: {formatearFecha(evento.fecha_fin)}</span>
+                          </div>
+                        )}
+                        <div className="detail-item">
+                          <span className="detail-icon">🔄</span>
+                          <span>{t.recurrente}</span>
+                        </div>
+                        {formatRecurrencia(evento.recurrencia) && (
+                          <div className="detail-item detail-recurrencia">
+                            <span className="detail-icon">📋</span>
+                            <span>{formatRecurrencia(evento.recurrencia)}</span>
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        {/* Evento puntual: fecha + hora exactas */}
+                        <div className="detail-item">
+                          <span className="detail-icon">📅</span>
+                          <span>{t.inicio}: {formatearFecha(evento.fecha_inicio)}{evento.hora_inicio ? ` · ${formatearHora(evento.hora_inicio)}` : ''}</span>
+                        </div>
+                        {(evento.fecha_fin || evento.hora_fin) && (
+                          <div className="detail-item">
+                            <span className="detail-icon">📅</span>
+                            <span>{t.fin}: {evento.fecha_fin ? formatearFecha(evento.fecha_fin) : '—'}{evento.hora_fin ? ` · ${formatearHora(evento.hora_fin)}` : ''}</span>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 </div>

@@ -1,6 +1,6 @@
 """
 Script para generar datos fake para la base de datos Events Query API.
-Genera 100 eventos para Malgrat de Mar y 100 para Blanes (200 total).
+Genera eventos únicos para Malgrat de Mar y Blanes (sin duplicados de título).
 Incluye embeddings generados con OpenAI.
 """
 
@@ -33,8 +33,35 @@ from scripts.data.lugares_reales import (
 # =============================================================================
 
 EVENTOS_POR_POBLACION = 100
-PORCENTAJE_RECURRENTES = 0.25  # 25% de eventos serán recurrentes
+PORCENTAJE_RECURRENTES_BASE = 0.20  # 20% de eventos no-recurrentes por defecto
 DIAS_RANGO_EVENTOS = 60  # Próximos 60 días (2 meses)
+
+# Títulos que son naturalmente recurrentes (clases, talleres, cursos periódicos)
+# Estos siempre se generarán como eventos recurrentes.
+TITULOS_RECURRENTES = {
+    "Clase de natación",
+    "Yoga al amanecer",
+    "Clase de pilates al aire libre",
+    "Clase de zumba",
+    "Clase de artes marciales",
+    "Clase de cerámica",
+    "Club de lectura",
+    "Taller de escritura creativa",
+    "Taller de percusión",
+    "Taller de guitarra",
+    "Curso de fotografía",
+    "Curso de idiomas",
+    "Curso de informática básica",
+    "Curso de defensa personal",
+    "Taller de jardinería urbana",
+    "Taller de huerto ecológico",
+    "Taller de costura creativa",
+    "Sardanas en la plaza",
+    "Cuentacuentos",
+    "Taller de robótica infantil",
+    "Circuito de crossfit",
+    "Taller de botánica",
+}
 
 CATEGORIAS = [
     {"id": 1, "slug": "cultura"},
@@ -110,34 +137,59 @@ def generate_id_unico(titulo: str, fecha: date, cp: str, index: int) -> str:
 # =============================================================================
 
 def generate_recurrencia_json(fecha_inicio: date) -> Dict[str, Any]:
-    """Genera un JSON de recurrencia aleatorio."""
+    """
+    Genera un JSON de recurrencia conforme a docs/Data.md.
+    Incluye tipo, intervalo, dias_semana, meses_activos y finalizacion.
+    """
     tipos_recurrencia = [
         {
             "tipo": "semanal",
-            "dias": random.sample(["lunes", "martes", "miercoles", "jueves", "viernes"], k=random.randint(1, 2))
+            "intervalo": 1,
+            "dias": random.sample(
+                ["lunes", "martes", "miercoles", "jueves", "viernes"],
+                k=random.randint(1, 2)
+            )
         },
         {
-            "tipo": "quincenal",
+            "tipo": "semanal",
+            "intervalo": 2,  # quincenal = semanal con intervalo 2
+            "dias": [random.choice(["sabado", "domingo"])]
+        },
+        {
+            "tipo": "semanal",
+            "intervalo": 1,
             "dias": [random.choice(["sabado", "domingo"])]
         }
     ]
-    
+
     recurrencia = random.choice(tipos_recurrencia)
     fecha_fin = fecha_inicio + timedelta(days=DIAS_RANGO_EVENTOS)
-    
-    hora_inicio = f"{random.randint(9, 19):02d}:00"
-    hora_fin = f"{random.randint(int(hora_inicio[:2]) + 1, 22):02d}:00"
-    
+
+    hora_inicio_h = random.randint(9, 19)
+    hora_fin_h = random.randint(hora_inicio_h + 1, min(hora_inicio_h + 3, 22))
+    hora_inicio = f"{hora_inicio_h:02d}:00"
+    hora_fin = f"{hora_fin_h:02d}:00"
+
+    regla: Dict[str, Any] = {
+        "dias_semana": recurrencia["dias"],
+        "finalizacion": {
+            "tipo": "fecha",
+            "valor": fecha_fin.isoformat()
+        }
+    }
+
+    # Añadir meses_activos en ~40% de los casos (como indica docs/Data.md)
+    if random.random() < 0.4:
+        mes_inicio = fecha_inicio.month
+        meses = sorted(set(
+            [(mes_inicio + i - 1) % 12 + 1 for i in range(random.randint(2, 4))]
+        ))
+        regla["meses_activos"] = meses
+
     return {
         "tipo": recurrencia["tipo"],
-        "intervalo": 1 if recurrencia["tipo"] == "semanal" else 2,
-        "regla": {
-            "dias_semana": recurrencia["dias"],
-            "finalizacion": {
-                "tipo": "fecha",
-                "valor": fecha_fin.isoformat()
-            }
-        },
+        "intervalo": recurrencia["intervalo"],
+        "regla": regla,
         "horarios": [{
             "inicio": hora_inicio,
             "fin": hora_fin
@@ -146,99 +198,131 @@ def generate_recurrencia_json(fecha_inicio: date) -> Dict[str, Any]:
 
 
 # =============================================================================
-# GENERADOR DE EVENTOS
+# GENERADOR DE EVENTOS (SIN DUPLICADOS)
 # =============================================================================
 
+def _build_unique_combos(
+    cp: str,
+    poblacion_data: Dict[str, Any]
+) -> List[Tuple[Dict, str, Dict]]:
+    """
+    Construye todas las combinaciones únicas (plantilla, categoría, lugar)
+    para una población. Deduplica por titulo_es para que cada título
+    aparezca como máximo una vez por ciudad.
+    """
+    # Combinar todos los lugares disponibles
+    lugares = (
+        poblacion_data["lugares_publicos"] +
+        poblacion_data["lugares_privados"]
+    )
+    for asoc in ASOCIACIONES:
+        if cp in asoc.get("poblaciones", []):
+            lugares.append({
+                "nombre": asoc["nombre"],
+                "direccion": f"Varies localitzacions - {poblacion_data['nombre']}",
+                "tipo": asoc["tipo"],
+                "organizador": asoc["organizador"],
+                "web": asoc.get("web"),
+                "categorias_tipicas": asoc["categorias_tipicas"]
+            })
+
+    # Agrupar por título: para cada título, guardar todas las opciones
+    # de (plantilla, categoría, [lugares posibles])
+    titulo_map: Dict[str, Dict[str, Any]] = {}
+
+    for lugar in lugares:
+        for cat_slug in lugar.get("categorias_tipicas", []):
+            if cat_slug not in EVENTOS_PLANTILLAS:
+                continue
+            for plantilla in EVENTOS_PLANTILLAS[cat_slug]:
+                titulo = plantilla["titulo_es"]
+                if titulo not in titulo_map:
+                    titulo_map[titulo] = {
+                        "plantilla": plantilla,
+                        "categoria": cat_slug,
+                        "lugares": []
+                    }
+                titulo_map[titulo]["lugares"].append(lugar)
+
+    # Para cada título único, elegir un lugar al azar → 1 combo por título
+    combos = []
+    for titulo, data in titulo_map.items():
+        lugar = random.choice(data["lugares"])
+        combos.append((data["plantilla"], data["categoria"], lugar))
+
+    random.shuffle(combos)
+    return combos
+
+
 def generate_fake_events() -> List[Dict[str, Any]]:
-    """Genera eventos fake para Malgrat y Blanes."""
+    """
+    Genera eventos fake para Malgrat y Blanes.
+    Cada título aparece como máximo UNA VEZ por ciudad (cero duplicados).
+    Los eventos naturalmente recurrentes usan Recurrencia_JSON.
+    """
     eventos = []
-    fecha_inicio = datetime.now().date()
-    
+    fecha_base = datetime.now().date()
+
     for cp, poblacion_data in POBLACIONES.items():
         print(f"\nGenerando eventos para {poblacion_data['nombre']} ({cp})...")
-        
-        # Combinar lugares públicos y privados
-        lugares = (
-            poblacion_data["lugares_publicos"] + 
-            poblacion_data["lugares_privados"]
-        )
-        
-        # Añadir asociaciones que operan en esta población
-        for asoc in ASOCIACIONES:
-            if cp in asoc.get("poblaciones", []):
-                lugares.append({
-                    "nombre": asoc["nombre"],
-                    "direccion": f"Varies localitzacions - {poblacion_data['nombre']}",
-                    "tipo": asoc["tipo"],
-                    "organizador": asoc["organizador"],
-                    "web": asoc.get("web"),
-                    "categorias_tipicas": asoc["categorias_tipicas"]
-                })
-        
-        eventos_generados = 0
-        intentos = 0
-        max_intentos = EVENTOS_POR_POBLACION * 3
-        
-        while eventos_generados < EVENTOS_POR_POBLACION and intentos < max_intentos:
-            intentos += 1
-            
-            # Seleccionar lugar aleatorio
-            lugar = random.choice(lugares)
-            
-            # Seleccionar categoría (preferir las típicas del lugar si las tiene)
-            categorias_tipicas = lugar.get("categorias_tipicas", list(EVENTOS_PLANTILLAS.keys()))
-            categoria_slug = random.choice(categorias_tipicas)
-            
-            if categoria_slug not in EVENTOS_PLANTILLAS:
-                continue
-            
-            # Seleccionar plantilla de evento
-            plantilla = random.choice(EVENTOS_PLANTILLAS[categoria_slug])
-            
-            # Generar fecha aleatoria
+
+        # Obtener combinaciones únicas (titulo → 1 lugar)
+        combos = _build_unique_combos(cp, poblacion_data)
+        seleccionados = combos[:EVENTOS_POR_POBLACION]
+
+        print(f"  Combinaciones únicas disponibles: {len(combos)}")
+        print(f"  Seleccionados: {len(seleccionados)}")
+
+        for idx, (plantilla, categoria_slug, lugar) in enumerate(seleccionados):
+            # Fecha aleatoria en el rango
             dias_adelante = random.randint(1, DIAS_RANGO_EVENTOS)
-            fecha_evento = fecha_inicio + timedelta(days=dias_adelante)
-            
-            # Decidir si es recurrente
-            es_recurrente = random.random() < PORCENTAJE_RECURRENTES
-            
+            fecha_evento = fecha_base + timedelta(days=dias_adelante)
+
+            # Decidir si es recurrente:
+            # - Títulos en TITULOS_RECURRENTES → siempre recurrente
+            # - Resto → probabilidad PORCENTAJE_RECURRENTES_BASE
+            es_recurrente = (
+                plantilla["titulo_es"] in TITULOS_RECURRENTES
+                or random.random() < PORCENTAJE_RECURRENTES_BASE
+            )
+
             # Generar ID único
             id_unico = generate_id_unico(
-                plantilla["titulo_es"],
-                fecha_evento,
-                cp,
-                eventos_generados
+                plantilla["titulo_es"], fecha_evento, cp, idx
             )
-            
-            # Precio (60% gratuitos para públicos, 30% para privados)
+
+            # Precio (70% gratuitos públicos, 80% asociaciones, 30% privados)
             if lugar["tipo"] == "PUBLICO":
                 es_gratuito = random.random() < 0.7
             elif lugar["tipo"] == "ASOCIACION":
                 es_gratuito = random.random() < 0.8
-            else:  # PRIVADO
+            else:
                 es_gratuito = random.random() < 0.3
-            
+
             precio = None if es_gratuito else round(random.uniform(5, 45), 2)
-            
-            # Hora (si no es recurrente)
+
+            # Horarios: coherencia entre columnas DB y JSON
             if es_recurrente:
                 recurrencia_json = generate_recurrencia_json(fecha_evento)
                 hora_inicio = recurrencia_json["horarios"][0]["inicio"]
                 hora_fin = recurrencia_json["horarios"][0]["fin"]
+                fecha_fin = fecha_evento + timedelta(days=DIAS_RANGO_EVENTOS)
             else:
-                hora_inicio = f"{random.randint(9, 20):02d}:{random.choice(['00', '30'])}:00"
-                hora_fin_h = min(int(hora_inicio[:2]) + random.randint(1, 3), 23)
+                hora_inicio_h = random.randint(9, 20)
+                hora_fin_h = min(hora_inicio_h + random.randint(1, 3), 23)
+                hora_inicio = f"{hora_inicio_h:02d}:{random.choice(['00', '30'])}:00"
                 hora_fin = f"{hora_fin_h:02d}:{random.choice(['00', '30'])}:00"
                 recurrencia_json = None
-            
-            # Construir título con ubicación
+                fecha_fin = fecha_evento
+
+            # Título con ubicación
             titulo_es = f"{plantilla['titulo_es']} - {poblacion_data['nombre']}"
             titulo_cat = f"{plantilla['titulo_cat']} - {poblacion_data['nombre']}"
-            
-            # Construir descripción completa
+
+            # Descripción con organizador y lugar
             desc_es = f"{plantilla['desc_es']} Organizado por {lugar['organizador']} en {lugar['nombre']}."
             desc_cat = f"{plantilla['desc_cat']} Organitzat per {lugar['organizador']} a {lugar['nombre']}."
-            
+
             evento = {
                 "id_unico": id_unico,
                 "titulo_es": titulo_es,
@@ -255,7 +339,7 @@ def generate_fake_events() -> List[Dict[str, Any]]:
                 "organizador_nombre": lugar["organizador"],
                 "organizador_web": lugar.get("web"),
                 "fecha_inicio": fecha_evento,
-                "fecha_fin": fecha_evento if not es_recurrente else fecha_evento + timedelta(days=DIAS_RANGO_EVENTOS),
+                "fecha_fin": fecha_fin,
                 "hora_inicio": hora_inicio,
                 "hora_fin": hora_fin,
                 "es_recurrente": es_recurrente,
@@ -265,14 +349,13 @@ def generate_fake_events() -> List[Dict[str, Any]]:
                 "tags_es": plantilla["tags_es"],
                 "tags_cat": plantilla["tags_cat"],
                 "categoria_slug": categoria_slug,
-                "categoria_id": SLUG_TO_ID.get(categoria_slug, 3)  # Default: ocio
+                "categoria_id": SLUG_TO_ID.get(categoria_slug, 3)
             }
-            
+
             eventos.append(evento)
-            eventos_generados += 1
-        
-        print(f"  -> {eventos_generados} eventos generados")
-    
+
+        print(f"  -> {len(seleccionados)} eventos generados (todos únicos)")
+
     return eventos
 
 
@@ -566,13 +649,13 @@ async def clear_existing_events(db: DatabaseService):
 async def main(clear_existing: bool = True):
     """Función principal."""
     print("=" * 60)
-    print("GENERADOR DE DATOS FAKE v2.0")
+    print("GENERADOR DE DATOS FAKE v3.0 (sin duplicados)")
     print("Events Query API - Malgrat de Mar & Blanes")
     print("=" * 60)
     print(f"\nConfiguración:")
-    print(f"  - Eventos por población: {EVENTOS_POR_POBLACION}")
-    print(f"  - Total eventos: {EVENTOS_POR_POBLACION * 2}")
-    print(f"  - % Recurrentes: {PORCENTAJE_RECURRENTES * 100}%")
+    print(f"  - Máx eventos por población: {EVENTOS_POR_POBLACION}")
+    print(f"  - Títulos naturalmente recurrentes: {len(TITULOS_RECURRENTES)}")
+    print(f"  - % Recurrentes base (otros): {PORCENTAJE_RECURRENTES_BASE * 100}%")
     print(f"  - Rango de fechas: próximos {DIAS_RANGO_EVENTOS} días")
     
     # Crear servicio de BD
