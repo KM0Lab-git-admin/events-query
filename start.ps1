@@ -11,18 +11,39 @@ Write-Host "Events Query - Iniciando servicios..." -ForegroundColor Cyan
 
 # 1. MySQL con Docker (si está disponible)
 if (Get-Command docker -ErrorAction SilentlyContinue) {
-    Write-Host "Levantando MySQL (Docker)..." -ForegroundColor Yellow
+    # Comprobar si el daemon de Docker está corriendo
+    $dockerOk = $false
     $ErrorActionPreference = "Continue"
-    docker compose up -d mysql 2>&1 | Out-Null
+    docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { $dockerOk = $true }
     $ErrorActionPreference = "Stop"
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "MySQL en marcha." -ForegroundColor Green
-        Start-Sleep -Seconds 2
+
+    if (-not $dockerOk) {
+        Write-Host "Docker no está corriendo. Inicia Docker Desktop y vuelve a ejecutar .\start.ps1" -ForegroundColor Red
+        Write-Host "O usa MySQL instalado localmente y asegúrate de que escucha en localhost:3306" -ForegroundColor DarkYellow
     } else {
-        Write-Host "Docker no disponible o fallo. Usa MySQL local si lo tienes." -ForegroundColor DarkYellow
+        Write-Host "Levantando MySQL (Docker)..." -ForegroundColor Yellow
+        $ErrorActionPreference = "Continue"
+        $dockerOut = docker compose up -d mysql 2>&1
+        $dockerExit = $LASTEXITCODE
+        $ErrorActionPreference = "Stop"
+
+        if ($dockerExit -eq 0) {
+            Start-Sleep -Seconds 2
+            $psOut = docker compose ps mysql 2>&1
+            if ($psOut -match "Up|running") {
+                Write-Host "MySQL en marcha (contenedor activo)." -ForegroundColor Green
+            } else {
+                Write-Host "MySQL arrancado. Si la API falla al conectar, ejecuta: docker compose ps" -ForegroundColor Green
+            }
+        } else {
+            Write-Host "Error al levantar MySQL con Docker:" -ForegroundColor Red
+            Write-Host $dockerOut
+            Write-Host "Comprueba que Docker Desktop está abierto o usa MySQL local." -ForegroundColor DarkYellow
+        }
     }
 } else {
-    Write-Host "Docker no encontrado. Asegúrate de tener MySQL corriendo." -ForegroundColor DarkYellow
+    Write-Host "Docker no encontrado. Instálalo o usa MySQL local en localhost:3306" -ForegroundColor DarkYellow
 }
 
 # 2. Backend (uvicorn) en ventana nueva
