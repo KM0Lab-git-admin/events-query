@@ -6,13 +6,16 @@ import logging
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
-from app.api.routes import router
+from app.api.v1.router import router as v1_router
 from app.services import db_service
 from app.services.seed_service import seed_if_empty
 
@@ -26,6 +29,9 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Rate limiter
+limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
@@ -92,23 +98,40 @@ app = FastAPI(
     version=settings.app_version,
     description=settings.app_description,
     lifespan=lifespan,
-    default_response_class=ORJSONResponse,  # Usar ORJSONResponse por defecto
+    default_response_class=ORJSONResponse,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json"
 )
 
+# Configure rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Configurar CORS
+allowed_origins = [
+    "https://app.km0lab.com",
+    "https://www.app.km0lab.com",
+    "https://eventquery.km0lab.com",
+    "http://localhost:5173",  # Vite dev
+    "http://localhost:3000",  # React dev
+]
+
+# In development, allow all origins
+if settings.environment == "development":
+    allowed_origins = ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins = ["*"],  # En producción, especificar dominios
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
 )
 
-# Incluir rutas
-app.include_router(router, tags=["Events"])
+# Include API v1 routes
+app.include_router(v1_router)
 
 # Middleware para logging de requests
 @app.middleware("http")
@@ -150,7 +173,7 @@ if FRONTEND_DIR.exists():
         Permite que React Router maneje el routing del lado del cliente.
         """
         # Si es una ruta de API conocida, dejar que FastAPI devuelva 404
-        api_prefixes = ("api", "events", "query", "health", "docs", "redoc", "openapi.json")
+        api_prefixes = ("api", "docs", "redoc", "openapi.json")
         if full_path.startswith(api_prefixes):
             return ORJSONResponse(
                 status_code=404,
