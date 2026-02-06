@@ -1,0 +1,14 @@
+---
+description: No dejar rastro de Cursor en commits (nunca usar Co-authored-by Cursor)
+alwaysApply: true
+---
+
+# Commits sin rastro de Cursor
+
+Al hacer cualquier commit en este repositorio:
+
+- **Nunca** añadas el trailer `Co-authored-by: Cursor <cursoragent@cursor.com>` (ni variantes).
+- **Nunca** uses `--trailer "Co-authored-by: Cursor ..."` ni incluyas ese texto en el mensaje de commit.
+- Los commits deben quedar sin ninguna referencia a Cursor en el historial.
+
+Aplica a todos los commits que ejecutes (git commit, en cualquier rama).
