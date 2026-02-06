@@ -860,6 +860,96 @@ body {
   margin-bottom: 10px;
 }
 
+/* Lista de eventos en respuesta del chat */
+.chat-events-list {
+  margin-top: 15px;
+  margin-bottom: 15px;
+}
+
+.chat-events-list h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2c3e50;
+  margin-bottom: 10px;
+}
+
+.chat-event-item {
+  background-color: #f8f9fa;
+  border-left: 4px solid #ccc;
+  border-radius: 4px;
+  padding: 10px;
+  margin-bottom: 8px;
+  transition: all 0.2s;
+}
+
+.chat-event-item.evento-pasa {
+  border-left-color: #4caf50;
+  background-color: #e8f5e9;
+}
+
+.chat-event-item.evento-no-pasa {
+  border-left-color: #f44336;
+  background-color: #ffebee;
+}
+
+.chat-event-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.evento-indicador {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.evento-titulo {
+  flex: 1;
+  font-weight: 600;
+  font-size: 13px;
+  color: #2c3e50;
+}
+
+.evento-score {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.evento-score.score-pasa {
+  background-color: #4caf50;
+  color: white;
+}
+
+.evento-score.score-no-pasa {
+  background-color: #f44336;
+  color: white;
+}
+
+.evento-descripcion {
+  font-size: 12px;
+  color: #666;
+  margin: 6px 0;
+  line-height: 1.4;
+}
+
+.evento-meta {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: #888;
+}
+
+.evento-meta span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .chat-details-summary {
   cursor: pointer;
   font-size: 12px;
@@ -1014,4 +1104,62 @@ body {
 
 .pagination-text {
   font-size: 13px;
+}
+
+/* ========================================
+   STICKY HEADER + BÚSQUEDA TEXTO LIBRE
+   ======================================== */
+
+.events-sticky-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background-color: white;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #e0e0e0;
+  margin-bottom: 12px;
+}
+
+/* Input de búsqueda de texto libre */
+.search-text-wrapper {
+  position: relative;
+  margin-bottom: 8px;
+}
+
+.search-text-input {
+  width: 100%;
+  padding: 10px 40px 10px 14px;
+  font-size: 14px;
+  border: 2px solid #3498db;
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+  background-color: #f8f9fa;
+}
+
+.search-text-input:focus {
+  border-color: #2980b9;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.15);
+  background-color: white;
+}
+
+.search-text-clear {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  font-size: 14px;
+  font-weight: 700;
+  color: #999;
+  cursor: pointer;
+  padding: 4px 6px;
+  line-height: 1;
+  border-radius: 4px;
+}
+
+.search-text-clear:hover {
+  color: #333;
+  background-color: #e0e0e0;
 }

@@ -4,7 +4,7 @@ Servicio para construir queries SQL de forma segura.
 
 import logging
 from typing import List, Optional, Tuple
-from datetime import date
+from datetime import date, timedelta
 
 from app.models.schemas import ExtractedParameters
 
@@ -17,7 +17,8 @@ class QueryBuilder:
     def build_events_query(
         self,
         codigos_postales: List[str],
-        params: ExtractedParameters
+        params: ExtractedParameters,
+        expand_for_semantic: bool = False
     ) -> Tuple[str, tuple]:
         """
         Construye una query SQL para buscar eventos con los parámetros dados.
@@ -25,6 +26,8 @@ class QueryBuilder:
         Args:
             codigos_postales: Lista de códigos postales a buscar
             params: Parámetros extraídos de la pregunta
+            expand_for_semantic: Si True, relaja filtros (sin categoría, rango de fechas ampliado)
+                                para obtener más candidatos y que la búsqueda semántica descarte.
         
         Returns:
             Tupla (query_sql, parametros_tupla)
@@ -66,7 +69,11 @@ class QueryBuilder:
                 ELSE em.Tags_Embedding_CAT
             END as tags_embedding_json,
             cp.Latitud as latitud,
-            cp.Longitud as longitud
+            cp.Longitud as longitud,
+            (SELECT c.Slug FROM EVENTO_CATEGORIAS ec
+             INNER JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
+             WHERE ec.ID_Unico_Evento = em.ID_Unico_Evento
+             LIMIT 1) AS categoria_slug
         FROM EVENTOS_MASTER em
         INNER JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
         INNER JOIN CODIGOS_POSTALES cp ON em.CP_Evento = cp.CP
@@ -88,20 +95,29 @@ class QueryBuilder:
             query += f" AND em.CP_Evento IN ({placeholders})"
             query_params.extend(codigos_postales)
         
-        # Filtro por fechas
-        if params.fechas:
+        # Filtro por fechas (si expand_for_semantic, ampliamos el rango para más candidatos)
+        if params.fechas and not expand_for_semantic:
             # Fechas específicas
             placeholders = ','.join(['%s'] * len(params.fechas))
             query += f" AND eh.Fecha_Inicio IN ({placeholders})"
             query_params.extend(params.fechas)
         elif params.fecha_inicio or params.fecha_fin:
             # Rango de fechas
-            if params.fecha_inicio:
+            fecha_ini = params.fecha_inicio
+            fecha_fin = params.fecha_fin
+            if expand_for_semantic:
+                # Ampliar ±14 días para tener más candidatos; la semántica descartará
+                delta = timedelta(days=14)
+                if fecha_ini:
+                    fecha_ini = fecha_ini - delta
+                if fecha_fin:
+                    fecha_fin = fecha_fin + delta
+            if fecha_ini:
                 query += " AND eh.Fecha_Inicio >= %s"
-                query_params.append(params.fecha_inicio)
-            if params.fecha_fin:
+                query_params.append(fecha_ini)
+            if fecha_fin:
                 query += " AND eh.Fecha_Inicio <= %s"
-                query_params.append(params.fecha_fin)
+                query_params.append(fecha_fin)
         
         # Filtro por precio - solo filtrar si el usuario pidió explícitamente eventos gratuitos
         if params.es_gratuito is True:
@@ -110,8 +126,8 @@ class QueryBuilder:
             query += " AND (em.Es_Gratuito = TRUE OR em.Precio_Euros <= %s)"
             query_params.append(params.precio_max)
         
-        # Filtro por categorías (si se especificaron)
-        if params.categorias:
+        # Filtro por categorías (omitir si expand_for_semantic: la semántica hará el ranking)
+        if params.categorias and not expand_for_semantic:
             # Subconsulta para filtrar por categorías
             placeholders = ','.join(['%s'] * len(params.categorias))
             query += f"""
@@ -127,8 +143,9 @@ class QueryBuilder:
         # Ordenar por fecha
         query += " ORDER BY eh.Fecha_Inicio ASC, eh.Hora_Inicio ASC"
         
-        # Limitar resultados (máximo 50 eventos para búsqueda semántica)
-        query += " LIMIT 50"
+        # Límite: más candidatos cuando hay búsqueda semántica para ver descartados
+        limit_val = 100 if expand_for_semantic else 50
+        query += f" LIMIT {limit_val}"
         
         logger.info(f"Query construida con {len(query_params)} parámetros")
         

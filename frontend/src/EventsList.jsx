@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 
 // Colores para categorías
 const CATEGORIA_COLORS = {
@@ -59,6 +59,7 @@ const TEXTOS_UI = {
     privado: 'Privado',
     asociacion: 'Asociación',
     placeholderTags: 'Ej: cultura, #gastronomia, yoga...',
+    buscar: 'Buscar en eventos...',
     error: 'Error'
   },
   ca: {
@@ -106,6 +107,7 @@ const TEXTOS_UI = {
     privado: 'Privat',
     asociacion: 'Associació',
     placeholderTags: 'Ex: cultura, #gastronomia, ioga...',
+    buscar: 'Cercar en esdeveniments...',
     error: 'Error'
   }
 }
@@ -136,6 +138,9 @@ function EventsList() {
     fecha_hasta: ''
   })
   
+  // Búsqueda de texto libre (client-side)
+  const [busquedaTexto, setBusquedaTexto] = useState('')
+
   // Paginación
   const [offset, setOffset] = useState(0)
   const limit = 20
@@ -328,6 +333,68 @@ function EventsList() {
     }
   }
 
+  /** Normaliza texto para búsqueda: minúsculas y sin acentos */
+  const normalizar = (texto) => {
+    if (!texto) return ''
+    return texto.toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+  }
+
+  /** Calcula score de coincidencia de un evento con el texto de búsqueda */
+  const calcularScore = (evento, termino) => {
+    if (!termino) return 0
+    const t = normalizar(termino)
+    let score = 0
+
+    // +3 titulo
+    if (normalizar(evento.titulo_es).includes(t) || normalizar(evento.titulo_cat).includes(t)) score += 3
+
+    // +2 ubicación (poblacion, lugar, direccion)
+    if (normalizar(evento.poblacion).includes(t)) score += 2
+    if (normalizar(evento.lugar).includes(t)) score += 2
+    if (normalizar(evento.direccion).includes(t)) score += 2
+
+    // +1 descripcion
+    if (normalizar(evento.descripcion_es).includes(t) || normalizar(evento.descripcion_cat).includes(t)) score += 1
+
+    // +1 organizador
+    if (normalizar(evento.organizador).includes(t)) score += 1
+
+    // +1 tags
+    const tagsStr = [
+      ...(evento.tags_es || []),
+      ...(evento.tags_cat || [])
+    ].join(' ')
+    if (normalizar(tagsStr).includes(t)) score += 1
+
+    // +1 categorias
+    const catsStr = [
+      ...(evento.categorias_es || []),
+      ...(evento.categorias_cat || [])
+    ].join(' ')
+    if (normalizar(catsStr).includes(t)) score += 1
+
+    return score
+  }
+
+  /** Eventos filtrados y ordenados por búsqueda de texto libre */
+  const eventosOrdenados = useMemo(() => {
+    if (!busquedaTexto.trim()) return eventos
+
+    const termino = busquedaTexto.trim()
+    const conScore = eventos.map((ev, idx) => ({
+      evento: ev,
+      score: calcularScore(ev, termino),
+      originalIdx: idx
+    }))
+
+    conScore.sort((a, b) => {
+      if (a.score !== b.score) return b.score - a.score
+      return a.originalIdx - b.originalIdx
+    })
+
+    return conScore.map(item => item.evento)
+  }, [eventos, busquedaTexto])
+
   /** Contenido del evento en el idioma seleccionado (con fallback al otro) */
   const eventoTexto = (evento, campo) => {
     if (campo === 'titulo') return idioma === 'ca' ? (evento.titulo_cat || evento.titulo_es) : evento.titulo_es
@@ -342,160 +409,183 @@ function EventsList() {
 
   return (
     <div className="events-container">
-      <div className="events-header-row">
-        <h2>{t.tituloSeccion}</h2>
-        <button
-          type="button"
-          className="btn-idioma"
-          onClick={() => setIdioma(prev => prev === 'es' ? 'ca' : 'es')}
-          title={idioma === 'es' ? t.cambiarIdioma : TEXTOS_UI.es.cambiarIdioma}
-        >
-          {idioma === 'es' ? 'Català' : 'Castellano'}
-        </button>
-      </div>
-      
-      {/* Panel de filtros */}
-      <div className="filters-panel">
-        <div className="filters-row">
-          {/* Población */}
-          <div className="filter-group">
-            <label>{t.poblacion}</label>
-            <select 
-              value={filtros.poblacion} 
-              onChange={(e) => handleFiltroChange('poblacion', e.target.value)}
-            >
-              <option value="">{t.todas}</option>
-              {poblaciones.map(p => (
-                <option key={p.cp} value={p.nombre}>
-                  {p.nombre} ({p.total_eventos})
-                </option>
-              ))}
-            </select>
-          </div>
-          
-          {/* Categoría */}
-          <div className="filter-group">
-            <label>{t.categoria}</label>
-            <select 
-              value={filtros.categoria} 
-              onChange={(e) => handleFiltroChange('categoria', e.target.value)}
-            >
-              <option value="">{t.todas}</option>
-              {categorias.map(c => (
-                <option key={c.slug} value={c.slug}>{idioma === 'ca' ? (c.nombre_cat || c.nombre_es) : c.nombre_es}</option>
-              ))}
-            </select>
-          </div>
-          
-          {/* Tipo organizador */}
-          <div className="filter-group">
-            <label>{t.organizador}</label>
-            <select 
-              value={filtros.tipo_organizador} 
-              onChange={(e) => handleFiltroChange('tipo_organizador', e.target.value)}
-            >
-              <option value="">{t.todos}</option>
-              <option value="PUBLICO">{t.publico}</option>
-              <option value="PRIVADO">{t.privado}</option>
-              <option value="ASOCIACION">{t.asociacion}</option>
-            </select>
-          </div>
-          
-          {/* Tags (campo abierto) */}
-          <div className="filter-group filter-group-tags">
-            <label>{t.tags}</label>
-            <input 
-              type="text" 
-              placeholder={t.placeholderTags}
-              value={filtros.tags}
-              onChange={(e) => handleFiltroChange('tags', e.target.value)}
-              className="filter-input-tags"
-            />
-          </div>
-          
-          {/* Gratuito */}
-          <div className="filter-group">
-            <label>{t.precio}</label>
-            <select 
-              value={filtros.es_gratuito} 
-              onChange={(e) => handleFiltroChange('es_gratuito', e.target.value)}
-            >
-              <option value="">{t.todos}</option>
-              <option value="true">{t.gratuitos}</option>
-              <option value="false">{t.dePago}</option>
-            </select>
-          </div>
-          
-          {/* Recurrente */}
-          <div className="filter-group">
-            <label>{t.tipo}</label>
-            <select 
-              value={filtros.es_recurrente} 
-              onChange={(e) => handleFiltroChange('es_recurrente', e.target.value)}
-            >
-              <option value="">{t.todos}</option>
-              <option value="true">{t.recurrentes}</option>
-              <option value="false">{t.puntuales}</option>
-            </select>
-          </div>
+      {/* Zona sticky: cabecera + filtros + búsqueda + resumen */}
+      <div className="events-sticky-header">
+        <div className="events-header-row">
+          <h2>{t.tituloSeccion}</h2>
+          <button
+            type="button"
+            className="btn-idioma"
+            onClick={() => setIdioma(prev => prev === 'es' ? 'ca' : 'es')}
+            title={idioma === 'es' ? t.cambiarIdioma : TEXTOS_UI.es.cambiarIdioma}
+          >
+            {idioma === 'es' ? 'Català' : 'Castellano'}
+          </button>
         </div>
         
-        <div className="filters-row">
-          {/* Fecha desde */}
-          <div className="filter-group">
-            <label>{t.desde}</label>
-            <input 
-              type="date" 
-              value={filtros.fecha_desde}
-              onChange={(e) => handleFiltroChange('fecha_desde', e.target.value)}
-            />
+        {/* Panel de filtros */}
+        <div className="filters-panel">
+          <div className="filters-row">
+            {/* Población */}
+            <div className="filter-group">
+              <label>{t.poblacion}</label>
+              <select 
+                value={filtros.poblacion} 
+                onChange={(e) => handleFiltroChange('poblacion', e.target.value)}
+              >
+                <option value="">{t.todas}</option>
+                {poblaciones.map(p => (
+                  <option key={p.cp} value={p.nombre}>
+                    {p.nombre} ({p.total_eventos})
+                  </option>
+                ))}
+              </select>
+            </div>
+            
+            {/* Categoría */}
+            <div className="filter-group">
+              <label>{t.categoria}</label>
+              <select 
+                value={filtros.categoria} 
+                onChange={(e) => handleFiltroChange('categoria', e.target.value)}
+              >
+                <option value="">{t.todas}</option>
+                {categorias.map(c => (
+                  <option key={c.slug} value={c.slug}>{idioma === 'ca' ? (c.nombre_cat || c.nombre_es) : c.nombre_es}</option>
+                ))}
+              </select>
+            </div>
+            
+            {/* Tipo organizador */}
+            <div className="filter-group">
+              <label>{t.organizador}</label>
+              <select 
+                value={filtros.tipo_organizador} 
+                onChange={(e) => handleFiltroChange('tipo_organizador', e.target.value)}
+              >
+                <option value="">{t.todos}</option>
+                <option value="PUBLICO">{t.publico}</option>
+                <option value="PRIVADO">{t.privado}</option>
+                <option value="ASOCIACION">{t.asociacion}</option>
+              </select>
+            </div>
+            
+            {/* Tags (campo abierto) */}
+            <div className="filter-group filter-group-tags">
+              <label>{t.tags}</label>
+              <input 
+                type="text" 
+                placeholder={t.placeholderTags}
+                value={filtros.tags}
+                onChange={(e) => handleFiltroChange('tags', e.target.value)}
+                className="filter-input-tags"
+              />
+            </div>
+            
+            {/* Gratuito */}
+            <div className="filter-group">
+              <label>{t.precio}</label>
+              <select 
+                value={filtros.es_gratuito} 
+                onChange={(e) => handleFiltroChange('es_gratuito', e.target.value)}
+              >
+                <option value="">{t.todos}</option>
+                <option value="true">{t.gratuitos}</option>
+                <option value="false">{t.dePago}</option>
+              </select>
+            </div>
+            
+            {/* Recurrente */}
+            <div className="filter-group">
+              <label>{t.tipo}</label>
+              <select 
+                value={filtros.es_recurrente} 
+                onChange={(e) => handleFiltroChange('es_recurrente', e.target.value)}
+              >
+                <option value="">{t.todos}</option>
+                <option value="true">{t.recurrentes}</option>
+                <option value="false">{t.puntuales}</option>
+              </select>
+            </div>
           </div>
           
-          {/* Fecha hasta */}
-          <div className="filter-group">
-            <label>{t.hasta}</label>
-            <input 
-              type="date" 
-              value={filtros.fecha_hasta}
-              onChange={(e) => handleFiltroChange('fecha_hasta', e.target.value)}
-            />
+          <div className="filters-row">
+            {/* Fecha desde */}
+            <div className="filter-group">
+              <label>{t.desde}</label>
+              <input 
+                type="date" 
+                value={filtros.fecha_desde}
+                onChange={(e) => handleFiltroChange('fecha_desde', e.target.value)}
+              />
+            </div>
+            
+            {/* Fecha hasta */}
+            <div className="filter-group">
+              <label>{t.hasta}</label>
+              <input 
+                type="date" 
+                value={filtros.fecha_hasta}
+                onChange={(e) => handleFiltroChange('fecha_hasta', e.target.value)}
+              />
+            </div>
+            
+            {/* Botón limpiar */}
+            <div className="filter-group">
+              <label>&nbsp;</label>
+              <button className="btn-limpiar" onClick={limpiarFiltros}>
+                {t.limpiarFiltros}
+              </button>
+            </div>
           </div>
-          
-          {/* Botón limpiar */}
-          <div className="filter-group">
-            <label>&nbsp;</label>
-            <button className="btn-limpiar" onClick={limpiarFiltros}>
-              {t.limpiarFiltros}
+        </div>
+
+        {/* Input de búsqueda de texto libre */}
+        <div className="search-text-wrapper">
+          <input
+            type="text"
+            className="search-text-input"
+            placeholder={t.buscar}
+            value={busquedaTexto}
+            onChange={(e) => setBusquedaTexto(e.target.value)}
+          />
+          {busquedaTexto && (
+            <button
+              type="button"
+              className="search-text-clear"
+              onClick={() => setBusquedaTexto('')}
+            >
+              X
             </button>
-          </div>
+          )}
+        </div>
+        
+        {/* Resumen */}
+        <div className="results-summary">
+          <span>
+            {loading ? t.cargando : `${total} ${t.eventosEncontrados}`}
+          </span>
+          {offset > 0 && (
+            <span className="pagination-info">
+              {t.mostrando} {offset + 1} - {Math.min(offset + limit, total)}
+            </span>
+          )}
         </div>
       </div>
       
-      {/* Resumen */}
-      <div className="results-summary">
-        <span>
-          {loading ? t.cargando : `${total} ${t.eventosEncontrados}`}
-        </span>
-        {offset > 0 && (
-          <span className="pagination-info">
-            {t.mostrando} {offset + 1} - {Math.min(offset + limit, total)}
-          </span>
-        )}
-      </div>
-      
-      {/* Lista de eventos */}
+      {/* Lista de eventos (zona scrollable) */}
       {error && <div className="error-message">{t.error}: {error}</div>}
       
       {loading ? (
         <div className="loading-spinner">{t.cargando}</div>
       ) : (
         <div className="events-grid">
-          {eventos.length === 0 ? (
+          {eventosOrdenados.length === 0 ? (
             <div className="no-results">
               {t.noResultados}
             </div>
           ) : (
-            eventos.map((evento) => (
+            eventosOrdenados.map((evento) => (
               <div key={evento.id} className="event-card event-card-full">
                 {/* Header con categorías y tipo organizador */}
                 <div className="event-card-header">

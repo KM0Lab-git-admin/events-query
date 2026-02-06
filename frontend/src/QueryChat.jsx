@@ -113,6 +113,42 @@ function QueryChat({ onAnalysisUpdate }) {
             <strong>{response.total} eventos encontrados</strong>
           </div>
 
+          {/* Lista de eventos con indicador de umbral */}
+          {response.eventos && response.eventos.length > 0 && (
+            <div className="chat-events-list">
+              <h3>Eventos encontrados:</h3>
+              {response.eventos.map((evento, idx) => {
+                const pasaUmbral = evento.similitud_score !== null && evento.similitud_score >= 0.4
+                return (
+                  <div 
+                    key={evento.id_unico_evento || idx} 
+                    className={`chat-event-item ${pasaUmbral ? 'evento-pasa' : 'evento-no-pasa'}`}
+                  >
+                    <div className="chat-event-header">
+                      <span className="evento-indicador">
+                        {pasaUmbral ? '✅' : '❌'}
+                      </span>
+                      <span className="evento-titulo">{evento.titulo || 'Sin título'}</span>
+                      {evento.similitud_score !== null && (
+                        <span className={`evento-score ${pasaUmbral ? 'score-pasa' : 'score-no-pasa'}`}>
+                          Score: {evento.similitud_score.toFixed(3)}
+                        </span>
+                      )}
+                    </div>
+                    {evento.descripcion_corta && (
+                      <p className="evento-descripcion">{evento.descripcion_corta}</p>
+                    )}
+                    <div className="evento-meta">
+                      {evento.poblacion_nombre && <span>📍 {evento.poblacion_nombre}</span>}
+                      {evento.fecha_inicio && <span>📅 {new Date(evento.fecha_inicio).toLocaleDateString('es-ES')}</span>}
+                      {evento.es_gratuito && <span>💰 Gratis</span>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+
           <details>
             <summary className="chat-details-summary">
               Ver JSON completo

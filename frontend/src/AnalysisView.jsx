@@ -52,7 +52,7 @@ export default function AnalysisView({ analisis }) {
       </p>
 
       <div className="events-analysis-list">
-        {analisis.map((evento) => {
+        {[...analisis].sort((a, b) => b.score_global - a.score_global).map((evento) => {
           const isExpanded = expandedEvents.has(evento.evento_id);
           const passFilter = evento.pasa_filtro;
 

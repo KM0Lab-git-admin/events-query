@@ -5,6 +5,7 @@ Orquesta todos los servicios (DB, IA, QueryBuilder) para procesar búsquedas.
 
 import json
 import logging
+import unicodedata
 from typing import List, Optional, Dict, Any
 
 from app.models.schemas import QueryRequest, QueryResponse, Evento, ExtractedParameters
@@ -39,8 +40,11 @@ class EventsService:
         codigos_postales = [request.cp_usuario]
         logger.info(f"Usando solo CP del usuario: {codigos_postales}")
         
-        # Paso 3: Construir query SQL
-        query, query_params = query_builder.build_events_query(codigos_postales, params)
+        # Paso 3: Construir query SQL (relajada si hay búsqueda semántica para ver descartados)
+        expand_for_semantic = bool(params.conceptos)
+        query, query_params = query_builder.build_events_query(
+            codigos_postales, params, expand_for_semantic=expand_for_semantic
+        )
         
         # Paso 4: Ejecutar query (pre-filtrado)
         eventos_raw = await db_service.execute_query(query, query_params)
@@ -51,7 +55,8 @@ class EventsService:
             eventos_raw,
             params.conceptos,
             params.idioma,
-            request.cp_usuario
+            request.cp_usuario,
+            categorias_solicitadas=params.categorias or []
         )
         
         # Paso 6: Convertir a modelos Pydantic
@@ -103,27 +108,50 @@ class EventsService:
         
         return response
     
+    def _normalizar_categoria_a_slug(self, nombre: str) -> str:
+        """Convierte nombre de categoría (ej. 'Cultura', 'Gastronomía') a slug (cultura, gastronomia)."""
+        if not nombre or not isinstance(nombre, str):
+            return ""
+        s = nombre.strip().lower()
+        s = "".join(c for c in s if c.isalnum() or c in " _")
+        s = s.replace(" ", "_")
+        # Normalizar acentos a ASCII para coincidir con slugs de BD
+        s = unicodedata.normalize("NFD", s)
+        s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+        return s or ""
+
     async def _semantic_search(
         self,
         eventos_raw: List[Dict[str, Any]],
         conceptos: List[str],
         idioma: str,
-        cp_usuario: str
+        cp_usuario: str,
+        categorias_solicitadas: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Realiza búsqueda semántica sobre los eventos pre-filtrados.
+        Si la categoría del evento coincide con una categoría solicitada, el score
+        se refuerza para superar el umbral (categoría tiene más peso que tags).
         
         Args:
             eventos_raw: Eventos del pre-filtrado SQL
             conceptos: Conceptos para búsqueda semántica
             idioma: Idioma ('es' o 'ca')
             cp_usuario: Código postal del usuario
+            categorias_solicitadas: Categorías extraídas de la pregunta (ej. ['Cultura'])
         
         Returns:
-            Lista de eventos filtrados por similitud semántica
+            Lista de eventos con score, ordenados por similitud
         """
         if not conceptos or not eventos_raw:
             return eventos_raw
+        
+        # Slugs de categorías solicitadas (ej. ['Cultura'] -> {'cultura'})
+        slugs_solicitados = set()
+        for cat in (categorias_solicitadas or []):
+            slug = self._normalizar_categoria_a_slug(cat)
+            if slug:
+                slugs_solicitados.add(slug)
         
         # Generar embedding de los conceptos del usuario
         conceptos_text = " ".join(conceptos)
@@ -138,6 +166,8 @@ class EventsService:
             if not embedding_json:
                 # Si no hay embedding, asignar score bajo
                 evento['similitud_score'] = 0.3
+                if slugs_solicitados and evento.get("categoria_slug") in slugs_solicitados:
+                    evento["similitud_score"] = max(evento["similitud_score"], 0.45)
                 eventos_con_score.append(evento)
                 continue
             
@@ -151,25 +181,25 @@ class EventsService:
                 # Calcular similitud coseno
                 similitud = ai_service.cosine_similarity(user_embedding, evento_embedding)
                 evento['similitud_score'] = similitud
-                
+                # Refuerzo por coincidencia de categoría (categoría > tags)
+                if slugs_solicitados and evento.get("categoria_slug") in slugs_solicitados:
+                    evento["similitud_score"] = max(evento["similitud_score"], 0.45)
                 eventos_con_score.append(evento)
                 
             except Exception as e:
                 logger.warning(f"Error al procesar embedding del evento {evento.get('id_unico_evento')}: {e}")
                 evento['similitud_score'] = 0.3
+                if slugs_solicitados and evento.get("categoria_slug") in slugs_solicitados:
+                    evento["similitud_score"] = max(evento["similitud_score"], 0.45)
                 eventos_con_score.append(evento)
         
-        # Filtrar por similitud mínima (0.4)
-        eventos_filtrados = [e for e in eventos_con_score if e['similitud_score'] >= 0.4]
+        # Ordenar por similitud descendente (sin filtrar por umbral)
+        # Esto permite mostrar todos los eventos: primero los que pasan el filtro, luego los que no
+        eventos_filtrados = sorted(eventos_con_score, key=lambda x: x['similitud_score'], reverse=True)
         
-        # Si no hay eventos con similitud >= 0.4, devolver los mejores 10
-        if not eventos_filtrados and eventos_con_score:
-            eventos_filtrados = sorted(eventos_con_score, key=lambda x: x['similitud_score'], reverse=True)[:10]
-        
-        # Ordenar por similitud descendente
-        eventos_filtrados.sort(key=lambda x: x['similitud_score'], reverse=True)
-        
-        logger.info(f"Búsqueda semántica: {len(eventos_filtrados)} eventos con similitud >= 0.4")
+        # Contar cuántos pasan el umbral para logging
+        eventos_que_pasan = [e for e in eventos_filtrados if e['similitud_score'] >= 0.4]
+        logger.info(f"Búsqueda semántica: {len(eventos_que_pasan)} eventos con similitud >= 0.4 de {len(eventos_filtrados)} totales")
         
         return eventos_filtrados
     
@@ -190,10 +220,7 @@ class EventsService:
         """
         eventos = []
         
-        logger.info(f"Iniciando conversión de {len(eventos_raw)} eventos raw a modelos Pydantic")
-        print(f"\n{'='*80}")
-        print(f"⚙️  INICIANDO CONVERSIÓN: {len(eventos_raw)} eventos raw")
-        print(f"{'='*80}\n")
+        logger.info(f"Iniciando conversion de {len(eventos_raw)} eventos raw a modelos Pydantic")
         
         # Obtener coordenadas del usuario
         coords_usuario = await db_service.get_coordenadas_cp(cp_usuario)
@@ -262,7 +289,6 @@ class EventsService:
                 
                 eventos.append(evento)
                 logger.debug(f"Evento {evento.id_unico_evento} convertido exitosamente")
-                print(f"✅ Evento {evento.id_unico_evento} convertido: {evento.titulo[:50] if evento.titulo else 'Sin título'}...")
                 
             except Exception as e:
                 error_msg = f"Error al convertir evento {evento_raw.get('id_unico_evento')}: {e}"
@@ -270,24 +296,11 @@ class EventsService:
                 logger.error(f"Datos del evento: {evento_raw}")
                 logger.exception("Stack trace completo:")
                 
-                # PRINT para asegurar visibilidad en consola
-                print("=" * 80)
-                print("\u274c ERROR EN CONVERSIÓN DE EVENTO:")
-                print(error_msg)
-                print(f"Tipo de error: {type(e).__name__}")
-                print(f"Datos del evento: {evento_raw}")
-                print("=" * 80)
+                logger.error(f"Tipo de error: {type(e).__name__}")
                 
                 continue
         
-        logger.info(f"Conversión completada: {len(eventos)} eventos convertidos de {len(eventos_raw)} raw")
-        
-        print(f"\n{'='*80}")
-        print(f"✅ CONVERSIÓN COMPLETADA:")
-        print(f"   - Eventos raw recibidos: {len(eventos_raw)}")
-        print(f"   - Eventos convertidos exitosamente: {len(eventos)}")
-        print(f"   - Eventos perdidos: {len(eventos_raw) - len(eventos)}")
-        print(f"{'='*80}\n")
+        logger.info(f"Conversion completada: {len(eventos)}/{len(eventos_raw)} eventos convertidos")
         
         return eventos
     
