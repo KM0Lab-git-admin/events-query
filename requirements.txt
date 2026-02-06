@@ -30,3 +30,4 @@ httpx==0.25.2
 black==24.3.0
 flake8==7.0.0
 mypy==1.9.0
+slowapi==0.1.9
