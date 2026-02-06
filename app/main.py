@@ -16,6 +16,7 @@ from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
 from app.api.v1.router import router as v1_router
+from app.api.routes import router as legacy_router
 from app.services import db_service
 from app.services.seed_service import seed_if_empty
 
@@ -130,8 +131,11 @@ app.add_middleware(
     expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
 )
 
-# Include API v1 routes
+# Include API v1 routes (production)
 app.include_router(v1_router)
+
+# Include legacy routes (backwards compatibility for PoC frontend)
+app.include_router(legacy_router, tags=["Legacy"])
 
 # Middleware para logging de requests
 @app.middleware("http")
