@@ -1,6 +1,6 @@
 # Events Query API
 
-**API REST para búsqueda inteligente de eventos usando lenguaje natural con IA**
+**API REST para búsqueda inteligente de eventos usando lenguaje natural con IA (ES/CAT)**
 
 [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green.svg)](https://fastapi.tiangolo.com/)
@@ -45,7 +45,7 @@ Events Query API es un sistema inteligente que permite buscar eventos locales us
 
 ### ⚡ Performance
 
-- **< 1.5 segundos**: Respuesta garantizada
+- **< 1.5 segundos**: Respuesta típica (objetivo del PoC)
 - **Arquitectura asíncrona**: FastAPI + aiomysql
 - **Connection pooling**: Optimización de BD
 - **ORJSONResponse**: Serialización ultra-rápida
@@ -56,6 +56,17 @@ Events Query API es un sistema inteligente que permite buscar eventos locales us
 - **Visualización de eventos**: Lista con filtros
 - **Chat de consultas**: Pregunta y responde en tiempo real
 - **Análisis detallado**: Ve paso a paso cómo la IA toma decisiones
+
+---
+
+## 🔀 Dual Router (Legacy + API v1)
+
+El backend expone **dos conjuntos de rutas** en paralelo:
+
+- **API v1 (recomendada)**: rutas versionadas bajo `/api/v1/*` (para producción y futuro)
+- **Legacy (compatibilidad / PoC)**: rutas antiguas (`/query`, `/events/*`, etc.) mantenidas temporalmente
+
+> Estrategia: mantener Legacy mientras migra el frontend/consumidores; después se marca como *deprecated* y se retira.
 
 ---
 
@@ -126,12 +137,18 @@ open http://localhost:3000
 
 ### Para Empezar
 
-- **[🚀 Quick Start](docs/QUICKSTART.md)** - Instalación y primer uso (5 minutos)
-- **[🏗️ Arquitectura](docs/ARCHITECTURE.md)** - Cómo funciona el sistema
-- **[👨‍💻 Desarrollo](docs/DEVELOPMENT.md)** - Guía para desarrolladores
-- **[🔧 Troubleshooting](docs/TROUBLESHOOTING.md)** - Solución de problemas
+- **[🚀 Quick Start](docs/QUICKSTART.md)** — Instalación y primer uso
+- **[🏗️ Arquitectura](docs/ARCHITECTURE.md)** — Cómo funciona el sistema end-to-end
+- **[🗃️ Modelo de datos + embeddings](docs/DATA_MODEL.md)** — Esquema, protocolo de ingesta, tags y embeddings
+- **[👨‍💻 Desarrollo](docs/DEVELOPMENT.md)** — Guía para desarrolladores (scripts, tests, roadmap)
+- **[🔧 Troubleshooting](docs/TROUBLESHOOTING.md)** — Solución de problemas
 
-### API Docs
+### API / Deploy
+
+- **[📡 API (Legacy + v1)](docs/API.md)** — Guía humana de consumo + ejemplos
+- **[🚢 Deployment (Railway)](docs/DEPLOYMENT.md)** — Variables, seed/fake data, embeddings, verificación Swagger
+
+### API Docs (runtime)
 
 - **Swagger UI**: http://localhost:8000/docs
 - **ReDoc**: http://localhost:8000/redoc
@@ -141,19 +158,27 @@ open http://localhost:3000
 
 ## 💡 Ejemplo de Uso
 
-### Endpoint Principal: `POST /query`
+### Endpoint recomendado (v1): `POST /api/v1/query`
 
 ```bash
-curl -X POST "http://localhost:8000/query" \
-  -H "Content-Type: application/json" \
-  -d '{
+curl -X POST "http://localhost:8000/api/v1/query"   -H "Content-Type: application/json"   -d '{
     "pregunta": "Actividades relacionadas con comida?",
     "cp_usuario": "08380",
     "debug": true
   }'
 ```
 
-### Respuesta
+### Endpoint Legacy (compatibilidad): `POST /query`
+
+```bash
+curl -X POST "http://localhost:8000/query"   -H "Content-Type: application/json"   -d '{
+    "pregunta": "Actividades relacionadas con comida?",
+    "cp_usuario": "08380",
+    "debug": true
+  }'
+```
+
+### Respuesta (ejemplo)
 
 ```json
 {
@@ -176,7 +201,15 @@ curl -X POST "http://localhost:8000/query" \
 }
 ```
 
-**Más ejemplos:** [`docs/DEVELOPMENT.md#ejemplos`](docs/DEVELOPMENT.md)
+**Más ejemplos y contratos:** [`docs/API.md`](docs/API.md)
+
+---
+
+## 🧰 Scripts importantes
+
+- `scripts/generate_fake_data.py` — genera datos fake (+ embeddings) e inserta en MySQL
+- `scripts/generate_embeddings.py` — (re)genera embeddings para eventos existentes
+- `scripts/verify_api_v1.py` — verifica que los endpoints v1 estén montados y visibles en Swagger
 
 ---
 
@@ -213,16 +246,17 @@ curl -X POST "http://localhost:8000/query" \
 ### ✅ Implementado (Fase 1 + PoC)
 
 - [x] Backend API completo con FastAPI
+- [x] Dual Router (Legacy + `/api/v1/*`) para compatibilidad y evolución
 - [x] Búsqueda en lenguaje natural (español/catalán)
 - [x] Búsqueda semántica con embeddings
 - [x] Búsqueda geográfica por CP y radio
 - [x] Base de datos MySQL con 8 tablas
-- [x] 125 eventos fake para testing
+- [x] Eventos fake para testing
 - [x] Frontend React con PoC funcional
 - [x] Sistema de análisis detallado de similitud
 - [x] Diagnóstico automático de problemas
 - [x] Propuestas de mejora con impacto estimado
-- [x] Documentación completa
+- [x] Documentación unificada en `docs/`
 
 ### 🚧 En Desarrollo
 
@@ -279,8 +313,6 @@ pnpm test
 
 ## 🤝 Contribuir
 
-Este proyecto está en desarrollo activo. Para contribuir:
-
 1. Lee [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)
 2. Crea una rama feature: `git checkout -b feature/nueva-funcionalidad`
 3. Haz commit: `git commit -m "feat: descripción"`
@@ -295,29 +327,13 @@ Este proyecto está en desarrollo activo. Para contribuir:
 
 ---
 
-## 👥 Equipo
-
-- **Desarrollo**: [Tu nombre]
-- **IA Assistant**: Manus AI
-
----
-
-## 🙏 Agradecimientos
-
-- **OpenAI** por la API de IA
-- **FastAPI** por el excelente framework
-- **Comunidad Python** por las librerías
-
----
-
 ## 📞 Soporte
 
 - **Documentación**: [`docs/`](docs/)
 - **Issues**: [GitHub Issues](https://github.com/tu-repo/issues)
-- **Email**: [tu-email]
 
 ---
 
 **Versión:** 1.0.0 (Fase 1 + PoC Frontend)  
-**Última actualización:** Enero 2026  
+**Última actualización:** 2026-02-07  
 **Estado:** ✅ Funcional y en desarrollo activo

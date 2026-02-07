@@ -4,6 +4,15 @@
 
 ---
 
+> 📌 **Docs relacionados (documentación unificada)**  
+> - [API (Legacy + v1)](./API.md)  
+> - [Deploy en Railway](./DEPLOYMENT.md)  
+> - [Arquitectura](./ARCHITECTURE.md)  
+> - [Modelo de datos + Ingesta IA](./DATA_MODEL.md)  
+> - [Desarrollo](./DEVELOPMENT.md)  
+> - [Troubleshooting](./TROUBLESHOOTING.md)
+
+
 ## 📋 Tabla de Contenidos
 
 1. [Estructura del Proyecto](#estructura-del-proyecto)

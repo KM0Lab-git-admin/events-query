@@ -5,6 +5,21 @@
 
 ---
 
+> 🔀 **Dual router (estado actual)**  
+> - Legacy: `/query`, `/events/list`, `/events/simple`, etc.  
+> - v1: `/api/v1/query`, `/api/v1/events`, etc.  
+> Ver detalles en [API.md](./API.md).
+
+
+> 📌 **Docs relacionados (documentación unificada)**  
+> - [API (Legacy + v1)](./API.md)  
+> - [Deploy en Railway](./DEPLOYMENT.md)  
+> - [Arquitectura](./ARCHITECTURE.md)  
+> - [Modelo de datos + Ingesta IA](./DATA_MODEL.md)  
+> - [Desarrollo](./DEVELOPMENT.md)  
+> - [Troubleshooting](./TROUBLESHOOTING.md)
+
+
 ## 📋 Tabla de Contenidos
 
 1. [Visión General](#visión-general)

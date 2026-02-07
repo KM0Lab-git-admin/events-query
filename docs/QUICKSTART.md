@@ -4,6 +4,15 @@
 
 ---
 
+> 📌 **Docs relacionados (documentación unificada)**  
+> - [API (Legacy + v1)](./API.md)  
+> - [Deploy en Railway](./DEPLOYMENT.md)  
+> - [Arquitectura](./ARCHITECTURE.md)  
+> - [Modelo de datos + Ingesta IA](./DATA_MODEL.md)  
+> - [Desarrollo](./DEVELOPMENT.md)  
+> - [Troubleshooting](./TROUBLESHOOTING.md)
+
+
 ## 📋 Requisitos Previos
 
 Antes de empezar, asegúrate de tener instalado:
@@ -133,7 +142,8 @@ pnpm dev
 ### Health Check
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:8000/api/v1/health
+# (legacy) curl http://localhost:8000/health
 ```
 
 **Respuesta esperada:**
@@ -238,7 +248,8 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 ```bash
 # 1. Verificar que backend está corriendo
-curl http://localhost:8000/health
+curl http://localhost:8000/api/v1/health
+# (legacy) curl http://localhost:8000/health
 
 # 2. Verificar proxy en vite.config.js
 cat frontend/vite.config.js

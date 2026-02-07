@@ -4,6 +4,15 @@
 
 ---
 
+> 📌 **Docs relacionados (documentación unificada)**  
+> - [API (Legacy + v1)](./API.md)  
+> - [Deploy en Railway](./DEPLOYMENT.md)  
+> - [Arquitectura](./ARCHITECTURE.md)  
+> - [Modelo de datos + Ingesta IA](./DATA_MODEL.md)  
+> - [Desarrollo](./DEVELOPMENT.md)  
+> - [Troubleshooting](./TROUBLESHOOTING.md)
+
+
 ## 📋 Tabla de Contenidos
 
 1. [Problemas de Setup](#problemas-de-setup)
@@ -912,3 +921,34 @@ Si ninguna de estas soluciones funciona:
 ---
 
 **¡Buena suerte! 🚀**
+
+---
+
+## 🔀 Problemas de Dual Router (Legacy vs v1)
+
+### 404 por usar el endpoint equivocado
+
+**Síntoma:** `404 Not Found`
+
+**Causa típica:** el cliente está llamando una ruta v1 desde el PoC (o una ruta legacy desde el frontend de producción).
+
+**Solución:**
+- PoC / compatibilidad: usa `/query`, `/events/list`, `/events/categorias`, etc.
+- Producción: usa `/api/v1/query`, `/api/v1/events`, `/api/v1/categories`, etc.
+
+Ver guía completa en [API.md](./API.md).
+
+### No veo endpoints v1 en Swagger
+
+**Síntoma:** en `/docs` no aparecen rutas `/api/v1/*`.
+
+**Causas típicas:**
+- servidor sin reiniciar tras actualizar código
+- branch/deploy equivocado
+- cache del navegador
+
+**Solución:**
+1. reiniciar el backend
+2. hard refresh del navegador
+3. ejecutar `python scripts/verify_api_v1.py` (si existe en tu repo) para validar rutas
+
