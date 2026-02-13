@@ -9,19 +9,33 @@ Set-Location $root
 
 Write-Host "Events Query - Deteniendo servicios..." -ForegroundColor Cyan
 
-# 1. Detener MySQL (Docker)
+# 1. Detener MySQL (Docker) y Docker Desktop
+$dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 if (Get-Command docker -ErrorAction SilentlyContinue) {
-    Write-Host "Deteniendo MySQL (Docker)..." -ForegroundColor Yellow
     $ErrorActionPreference = "Continue"
-    docker compose stop mysql 2>&1 | Out-Null
+    docker info 2>&1 | Out-Null
+    $dockerRunning = ($LASTEXITCODE -eq 0)
     $ErrorActionPreference = "Stop"
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "MySQL detenido." -ForegroundColor Green
-    } else {
-        Write-Host "Docker no respondió o MySQL no estaba corriendo." -ForegroundColor DarkYellow
+
+    if ($dockerRunning) {
+        Write-Host "Deteniendo MySQL (Docker)..." -ForegroundColor Yellow
+        $ErrorActionPreference = "Continue"
+        docker compose stop mysql 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "MySQL detenido." -ForegroundColor Green
+        } else {
+            Write-Host "Docker no respondió o MySQL no estaba corriendo." -ForegroundColor DarkYellow
+        }
+    }
+
+    if (Test-Path $dockerExe) {
+        Write-Host "Cerrando Docker Desktop..." -ForegroundColor Yellow
+        Start-Process -FilePath $dockerExe -ArgumentList "-Quit" -ErrorAction SilentlyContinue
+        Write-Host "Docker Desktop cerrado." -ForegroundColor Green
     }
 } else {
-    Write-Host "Docker no encontrado. Omitiendo MySQL." -ForegroundColor DarkYellow
+    Write-Host "Docker no encontrado. Omitiendo MySQL y Docker." -ForegroundColor DarkYellow
 }
 
 # 2. Detener proceso en puerto 8000 (API / uvicorn)

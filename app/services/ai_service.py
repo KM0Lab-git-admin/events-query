@@ -250,32 +250,43 @@ Código postal usuario: {cp_usuario}"""
             else:
                 return "Lo siento, no he encontrado ningún evento que coincida con tu búsqueda."
         
-        # Preparar resumen de eventos para el prompt
+        # Solo eventos con alta coincidencia (mayor) para el mensaje al usuario
+        eventos_mayor = [e for e in eventos if getattr(e, 'nivel_coincidencia', None) == 'mayor']
+        eventos_para_resumen = eventos_mayor if eventos_mayor else eventos
+
+        # Preparar resumen de eventos para el prompt (incluir rango de fechas para recurrentes)
         eventos_resumen = []
-        for i, evento in enumerate(eventos[:5], 1):  # Solo los primeros 5 para el prompt
+        for i, evento in enumerate(eventos_para_resumen[:5], 1):  # Solo los primeros 5 para el prompt
             resumen = f"{i}. {evento.titulo} - {evento.poblacion_nombre}"
-            if evento.fecha_inicio:
+            if evento.fecha_inicio and evento.fecha_fin:
+                resumen += f" (del {evento.fecha_inicio} al {evento.fecha_fin})"
+            elif evento.fecha_fin:
+                resumen += f" (hasta el {evento.fecha_fin})"
+            elif evento.fecha_inicio:
                 resumen += f" ({evento.fecha_inicio})"
             if evento.es_gratuito:
                 resumen += " [GRATUITO]"
             eventos_resumen.append(resumen)
         
+        num_alta = len(eventos_mayor)
         system_prompt = f"""Eres un asistente que ayuda a encontrar eventos.
 Genera una respuesta natural y amigable en {"catalán" if idioma == "ca" else "español"}.
 
-Incluye:
-1. Número total de eventos encontrados
-2. Breve mención de los eventos más relevantes
-3. Tono conversacional y útil
+Reglas importantes:
+- NO menciones el número total de eventos de la lista completa (p. ej. "100 eventos").
+- Menciona SOLO los eventos con alta coincidencia en tags y categorías (los que te paso a continuación). Si hay {num_alta} con alta coincidencia, di ese número o habla solo de esos.
+- Indica que los eventos que citas coinciden en tags y categorías con la búsqueda del usuario.
+- Para eventos con varias fechas o recurrentes (tienen "del X al Y" o "hasta el Y"), describe el periodo activo (p. ej. "hasta el Y") y no solo la fecha de inicio si ya ha pasado.
+- Tono conversacional y útil.
 
 NO inventes información. Solo usa los datos proporcionados."""
 
         user_prompt = f"""Pregunta del usuario: "{pregunta}"
 
-Eventos encontrados ({len(eventos)} total):
-{chr(10).join(eventos_resumen)}
+Eventos con alta coincidencia ({num_alta}):
+{chr(10).join(eventos_resumen) if eventos_resumen else '(ninguno con alta coincidencia)'}
 
-Genera una respuesta natural."""
+Genera una respuesta natural que hable solo de estos eventos con alta coincidencia."""
 
         try:
             response = await self.client.chat.completions.create(
@@ -295,11 +306,11 @@ Genera una respuesta natural."""
             
         except Exception as e:
             logger.error(f"Error al generar respuesta: {e}")
-            # Fallback: respuesta simple
+            # Fallback: respuesta simple (sin citar total)
             if idioma == "ca":
-                return f"He trobat {len(eventos)} esdeveniments per a tu."
+                return "He trobat esdeveniments que coincideixen en tags i categories amb la teva cerca."
             else:
-                return f"He encontrado {len(eventos)} eventos para ti."
+                return "He encontrado eventos que coinciden en tags y categorías con tu búsqueda."
 
 
 # Instancia global del servicio

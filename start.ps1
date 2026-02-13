@@ -10,6 +10,7 @@ Set-Location $root
 Write-Host "Events Query - Iniciando servicios..." -ForegroundColor Cyan
 
 # 1. MySQL con Docker (si está disponible)
+$dockerExe = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 if (Get-Command docker -ErrorAction SilentlyContinue) {
     # Comprobar si el daemon de Docker está corriendo
     $dockerOk = $false
@@ -19,9 +20,32 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
     $ErrorActionPreference = "Stop"
 
     if (-not $dockerOk) {
-        Write-Host "Docker no está corriendo. Inicia Docker Desktop y vuelve a ejecutar .\start.ps1" -ForegroundColor Red
-        Write-Host "O usa MySQL instalado localmente y asegúrate de que escucha en localhost:3306" -ForegroundColor DarkYellow
-    } else {
+        if (Test-Path $dockerExe) {
+            Write-Host "Arrancando Docker Desktop..." -ForegroundColor Yellow
+            Start-Process -FilePath $dockerExe
+            $maxWait = 60
+            $waited = 0
+            while ($waited -lt $maxWait) {
+                Start-Sleep -Seconds 5
+                $waited += 5
+                docker info 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) {
+                    $dockerOk = $true
+                    Write-Host "Docker Desktop listo." -ForegroundColor Green
+                    break
+                }
+                Write-Host "Esperando a Docker... ($waited s)" -ForegroundColor DarkGray
+            }
+            if (-not $dockerOk) {
+                Write-Host "Docker no respondió a tiempo. Inicia Docker Desktop manualmente y vuelve a ejecutar .\start.ps1" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "Docker no está corriendo y no se encontró Docker Desktop en $dockerExe" -ForegroundColor Red
+            Write-Host "Inicia Docker Desktop manualmente o usa MySQL local en localhost:3306" -ForegroundColor DarkYellow
+        }
+    }
+
+    if ($dockerOk) {
         Write-Host "Levantando MySQL (Docker)..." -ForegroundColor Yellow
         $ErrorActionPreference = "Continue"
         $dockerOut = docker compose up -d mysql 2>&1

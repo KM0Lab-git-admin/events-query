@@ -124,21 +124,39 @@ class EventsService:
             return date.fromisoformat(fi[:10])
         return None
 
+    def _parse_fecha_fin(self, ev: Dict[str, Any]) -> Optional[date]:
+        """Extrae fecha_fin de un evento como date o None."""
+        ff = ev.get('fecha_fin')
+        if not ff:
+            return None
+        if hasattr(ff, 'date'):
+            return ff.date()
+        if isinstance(ff, str) and len(ff) >= 10:
+            return date.fromisoformat(ff[:10])
+        return None
+
     def _filtrar_por_fechas(
         self,
         eventos: List[Dict[str, Any]],
         params: ExtractedParameters
     ) -> List[Dict[str, Any]]:
-        """Descartar eventos anteriores a hoy y fuera del rango solicitado."""
+        """Descartar eventos ya terminados y fuera del rango solicitado."""
         hoy = date.today()
         resultado = []
 
         for ev in eventos:
             fi = self._parse_fecha_inicio(ev)
-            # Siempre descartar eventos anteriores a la fecha actual
-            if fi and fi < hoy:
+            ff = self._parse_fecha_fin(ev)
+            # Descartar si el evento ya terminó (fecha_fin < hoy)
+            if ff and ff < hoy:
                 continue
-            # Si no hay fecha, mantener (eventos sin fecha no se descartan por antigüedad)
+            # Si fecha_inicio es pasada pero fecha_fin es futura (evento recurrente/activo), mantener
+            if fi and fi < hoy:
+                if ff and ff >= hoy:
+                    resultado.append(ev)
+                    continue
+                continue
+            # Si no hay fecha inicio, mantener (eventos sin fecha no se descartan por antigüedad)
             if not fi:
                 resultado.append(ev)
                 continue
@@ -266,6 +284,8 @@ class EventsService:
                 score = max(score, 0.45)
             
             evento['similitud_score'] = round(score, 4)
+            evento['similitud_tags'] = round(sim_tags, 4)
+            evento['similitud_categoria'] = round(sim_cat, 4)
             eventos_con_score.append(evento)
         
         # Ordenar por similitud descendente (sin filtrar por umbral)
@@ -338,9 +358,11 @@ class EventsService:
                 #     logger.warning(f"Evento {evento_raw.get('id_unico_evento')} sin título, saltando")
                 #     continue
                 
-                # Asignar nivel_coincidencia según score
+                # Asignar nivel_coincidencia: mayor si score >= 0.55 o (tags y categoría >= 0.5)
                 score = evento_raw.get('similitud_score', 0.0)
-                if score >= 0.55:
+                sim_tags = evento_raw.get('similitud_tags', 0.0)
+                sim_cat = evento_raw.get('similitud_categoria', 0.0)
+                if score >= 0.55 or (sim_tags >= 0.5 and sim_cat >= 0.5):
                     nivel = "mayor"
                 elif score >= 0.40:
                     nivel = "templada"
