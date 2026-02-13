@@ -1163,3 +1163,42 @@ body {
   color: #333;
   background-color: #e0e0e0;
 }
+
+/* ========================================
+   BLOQUES DE COINCIDENCIA (4 niveles)
+   ======================================== */
+
+.chat-events-block {
+  margin-bottom: 16px;
+  padding: 12px;
+  border-radius: 8px;
+  border-left: 4px solid;
+}
+
+.chat-events-block .block-titulo {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 10px 0;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(0,0,0,0.08);
+}
+
+.chat-events-block.coincidencia-mayor {
+  background-color: #e8f5e9;
+  border-left-color: #2e7d32;
+}
+
+.chat-events-block.coincidencia-templada {
+  background-color: #fff8e1;
+  border-left-color: #f9a825;
+}
+
+.chat-events-block.coincidencia-baja {
+  background-color: #fff3e0;
+  border-left-color: #ef6c00;
+}
+
+.chat-events-block.coincidencia-muy-poca {
+  background-color: #f5f5f5;
+  border-left-color: #9e9e9e;
+}

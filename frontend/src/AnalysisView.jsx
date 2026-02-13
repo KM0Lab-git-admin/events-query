@@ -83,9 +83,37 @@ export default function AnalysisView({ analisis }) {
                 </div>
               </div>
 
-              {/* Expanded Content */}
+              {/* Expanded Content - Orden: Categoría (más relevante), Tags, Descripción */}
               {isExpanded && (
                 <div className="event-details">
+                  {/* Similitud por Categoría de producto (primero: más relevante que tags) */}
+                  {evento.similitud_categoria && (
+                    <div className="analysis-section">
+                      <h4>📂 Similitud por Categoría</h4>
+                      <div className="category-similarity">
+                        <span className="category-name">{evento.similitud_categoria.categoria}</span>
+                        <div className="similarity-bar-container">
+                          <div 
+                            className="similarity-bar" 
+                            style={{ 
+                              width: `${evento.similitud_categoria.similitud * 100}%`,
+                              backgroundColor: evento.similitud_categoria.similitud > 0.3 ? '#10b981' : '#ef4444'
+                            }}
+                          />
+                        </div>
+                        <span className="similarity-value">{evento.similitud_categoria.similitud}</span>
+                      </div>
+                      {evento.similitud_categoria.similitud < 0.3 && (
+                        <p className="warning-text">⚠️ Categoría poco relevante para la búsqueda</p>
+                      )}
+                      {evento.diagnostico?.impacto_categoria && (
+                        <p className="impacto-categoria">
+                          Impacto: {evento.diagnostico.impacto_categoria.aporta}
+                        </p>
+                      )}
+                    </div>
+                  )}
+
                   {/* Similitud por Tag */}
                   {evento.similitud_por_tag && evento.similitud_por_tag.length > 0 && (
                     <div className="analysis-section">
@@ -114,29 +142,6 @@ export default function AnalysisView({ analisis }) {
                           );
                         })}
                       </div>
-                    </div>
-                  )}
-
-                  {/* Similitud por Categoría */}
-                  {evento.similitud_categoria && (
-                    <div className="analysis-section">
-                      <h4>📂 Similitud por Categoría</h4>
-                      <div className="category-similarity">
-                        <span className="category-name">{evento.similitud_categoria.categoria}</span>
-                        <div className="similarity-bar-container">
-                          <div 
-                            className="similarity-bar" 
-                            style={{ 
-                              width: `${evento.similitud_categoria.similitud * 100}%`,
-                              backgroundColor: evento.similitud_categoria.similitud > 0.3 ? '#10b981' : '#ef4444'
-                            }}
-                          />
-                        </div>
-                        <span className="similarity-value">{evento.similitud_categoria.similitud}</span>
-                      </div>
-                      {evento.similitud_categoria.similitud < 0.3 && (
-                        <p className="warning-text">⚠️ Categoría poco relevante para la búsqueda</p>
-                      )}
                     </div>
                   )}
 

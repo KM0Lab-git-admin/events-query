@@ -113,41 +113,60 @@ function QueryChat({ onAnalysisUpdate }) {
             <strong>{response.total} eventos encontrados</strong>
           </div>
 
-          {/* Lista de eventos con indicador de umbral */}
-          {response.eventos && response.eventos.length > 0 && (
-            <div className="chat-events-list">
-              <h3>Eventos encontrados:</h3>
-              {response.eventos.map((evento, idx) => {
-                const pasaUmbral = evento.similitud_score !== null && evento.similitud_score >= 0.4
-                return (
-                  <div 
-                    key={evento.id_unico_evento || idx} 
-                    className={`chat-event-item ${pasaUmbral ? 'evento-pasa' : 'evento-no-pasa'}`}
-                  >
-                    <div className="chat-event-header">
-                      <span className="evento-indicador">
-                        {pasaUmbral ? '✅' : '❌'}
-                      </span>
-                      <span className="evento-titulo">{evento.titulo || 'Sin título'}</span>
-                      {evento.similitud_score !== null && (
-                        <span className={`evento-score ${pasaUmbral ? 'score-pasa' : 'score-no-pasa'}`}>
-                          Score: {evento.similitud_score.toFixed(3)}
-                        </span>
-                      )}
+          {/* Eventos en 4 bloques por nivel de coincidencia */}
+          {response.eventos && response.eventos.length > 0 && (() => {
+            const BLOQUES = [
+              { nivel: 'mayor', titulo: 'Coincidencia mayor', clase: 'coincidencia-mayor', max: 10 },
+              { nivel: 'templada', titulo: 'Coincidencia templada', clase: 'coincidencia-templada', max: 10 },
+              { nivel: 'baja', titulo: 'Coincidencia baja', clase: 'coincidencia-baja', max: 10 },
+              { nivel: 'muy_poca', titulo: 'Muy poca coincidencia', clase: 'coincidencia-muy-poca', max: 10 }
+            ]
+            const porNivel = { mayor: [], templada: [], baja: [], muy_poca: [] }
+            response.eventos.forEach(ev => {
+              const n = ev.nivel_coincidencia || 'muy_poca'
+              if (porNivel[n] && porNivel[n].length < 10) porNivel[n].push(ev)
+            })
+            return (
+              <div className="chat-events-list">
+                {BLOQUES.map(({ nivel, titulo, clase, max }) => {
+                  const eventos = porNivel[nivel] || []
+                  if (eventos.length === 0) return null
+                  return (
+                    <div key={nivel} className={`chat-events-block ${clase}`}>
+                      <h4 className="block-titulo">{titulo} ({eventos.length})</h4>
+                      {eventos.map((evento, idx) => {
+                        const pasaUmbral = evento.similitud_score !== null && evento.similitud_score >= 0.4
+                        return (
+                          <div
+                            key={evento.id_unico_evento || idx}
+                            className={`chat-event-item ${pasaUmbral ? 'evento-pasa' : 'evento-no-pasa'}`}
+                          >
+                            <div className="chat-event-header">
+                              <span className="evento-indicador">{pasaUmbral ? '✅' : '❌'}</span>
+                              <span className="evento-titulo">{evento.titulo || 'Sin título'}</span>
+                              {evento.similitud_score !== null && (
+                                <span className={`evento-score ${pasaUmbral ? 'score-pasa' : 'score-no-pasa'}`}>
+                                  Score: {evento.similitud_score.toFixed(3)}
+                                </span>
+                              )}
+                            </div>
+                            {evento.descripcion_corta && (
+                              <p className="evento-descripcion">{evento.descripcion_corta}</p>
+                            )}
+                            <div className="evento-meta">
+                              {evento.poblacion_nombre && <span>📍 {evento.poblacion_nombre}</span>}
+                              {evento.fecha_inicio && <span>📅 {new Date(evento.fecha_inicio).toLocaleDateString('es-ES')}</span>}
+                              {evento.es_gratuito && <span>💰 Gratis</span>}
+                            </div>
+                          </div>
+                        )
+                      })}
                     </div>
-                    {evento.descripcion_corta && (
-                      <p className="evento-descripcion">{evento.descripcion_corta}</p>
-                    )}
-                    <div className="evento-meta">
-                      {evento.poblacion_nombre && <span>📍 {evento.poblacion_nombre}</span>}
-                      {evento.fecha_inicio && <span>📅 {new Date(evento.fecha_inicio).toLocaleDateString('es-ES')}</span>}
-                      {evento.es_gratuito && <span>💰 Gratis</span>}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          )}
+                  )
+                })}
+              </div>
+            )
+          })()}
 
           <details>
             <summary className="chat-details-summary">

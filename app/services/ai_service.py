@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from typing import List, Dict, Any, Optional
+from datetime import date
 from datetime import datetime, timedelta
 from openai import AsyncOpenAI
 from tenacity import (
@@ -78,8 +79,8 @@ Extrae los siguientes parámetros de la pregunta del usuario:
 7. es_gratuito: true si pide eventos gratuitos
 8. precio_max: precio máximo en euros
 
-Expresiones temporales:
-- "este fin de semana": próximo sábado y domingo
+Expresiones temporales (viernes, sábado y domingo = fin de semana):
+- "este fin de semana" / "este finde": viernes, sábado y domingo de la semana actual o próxima
 - "este sábado": próximo sábado
 - "mañana": {(hoy + timedelta(days=1)).strftime('%Y-%m-%d')}
 - "hoy": {hoy.strftime('%Y-%m-%d')}
@@ -107,6 +108,15 @@ Código postal usuario: {cp_usuario}"""
             # Validar y crear ExtractedParameters
             params = ExtractedParameters(**params_dict)
             
+            # Fallback: si no hay fechas pero la pregunta menciona "fin de semana", calcular
+            pregunta_lower = pregunta.lower()
+            if not params.fechas and not params.fecha_inicio and not params.fecha_fin:
+                if any(x in pregunta_lower for x in ["fin de semana", "finde", "este finde", "este fin de semana"]):
+                    fechas_finde = self._calcular_fechas_fin_de_semana(hoy)
+                    if fechas_finde:
+                        params.fechas = fechas_finde
+                        logger.info(f"Fallback: fechas fin de semana = {fechas_finde}")
+            
             logger.info(f"Parámetros extraídos: idioma={params.idioma}, categorias={params.categorias}, conceptos={params.conceptos}")
             
             return params
@@ -114,10 +124,28 @@ Código postal usuario: {cp_usuario}"""
         except Exception as e:
             logger.error(f"Error al extraer parámetros: {e}")
             # Fallback: parámetros por defecto
-            return ExtractedParameters(
+            params = ExtractedParameters(
                 idioma="es" if any(word in pregunta.lower() for word in ["qué", "dónde", "cuándo"]) else "ca",
                 conceptos=[pregunta]
             )
+            # Fallback fechas fin de semana
+            if any(x in pregunta.lower() for x in ["fin de semana", "finde", "este finde"]):
+                params.fechas = self._calcular_fechas_fin_de_semana(datetime.now().date())
+            return params
+    
+    def _calcular_fechas_fin_de_semana(self, hoy: date) -> List[date]:
+        """Calcula viernes, sábado y domingo del fin de semana actual o próximo."""
+        wd = hoy.weekday()  # 0=lunes, 4=viernes, 5=sábado, 6=domingo
+        if wd <= 3:  # lunes a jueves: próximo viernes, sábado, domingo
+            dias_hasta_viernes = 4 - wd
+            viernes = hoy + timedelta(days=dias_hasta_viernes)
+            return [viernes, viernes + timedelta(days=1), viernes + timedelta(days=2)]
+        elif wd == 4:  # viernes: hoy, sábado, domingo
+            return [hoy, hoy + timedelta(days=1), hoy + timedelta(days=2)]
+        elif wd == 5:  # sábado: hoy, domingo
+            return [hoy, hoy + timedelta(days=1)]
+        else:  # domingo: solo hoy
+            return [hoy]
     
     def _get_cache_key(self, text: str) -> str:
         """Genera una clave de cache para un texto."""

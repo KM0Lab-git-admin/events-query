@@ -95,23 +95,16 @@ class QueryBuilder:
             query += f" AND em.CP_Evento IN ({placeholders})"
             query_params.extend(codigos_postales)
         
-        # Filtro por fechas (si expand_for_semantic, ampliamos el rango para más candidatos)
-        if params.fechas and not expand_for_semantic:
+        # Filtro por fechas (siempre estricto, nunca ampliar)
+        if params.fechas:
             # Fechas específicas
             placeholders = ','.join(['%s'] * len(params.fechas))
             query += f" AND eh.Fecha_Inicio IN ({placeholders})"
             query_params.extend(params.fechas)
         elif params.fecha_inicio or params.fecha_fin:
-            # Rango de fechas
+            # Rango de fechas (nunca ampliar: filtro temporal es estricto)
             fecha_ini = params.fecha_inicio
             fecha_fin = params.fecha_fin
-            if expand_for_semantic:
-                # Ampliar ±14 días para tener más candidatos; la semántica descartará
-                delta = timedelta(days=14)
-                if fecha_ini:
-                    fecha_ini = fecha_ini - delta
-                if fecha_fin:
-                    fecha_fin = fecha_fin + delta
             if fecha_ini:
                 query += " AND eh.Fecha_Inicio >= %s"
                 query_params.append(fecha_ini)

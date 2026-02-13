@@ -6,6 +6,7 @@ Orquesta todos los servicios (DB, IA, QueryBuilder) para procesar búsquedas.
 import json
 import logging
 import unicodedata
+from datetime import date
 from typing import List, Optional, Dict, Any
 
 from app.models.schemas import QueryRequest, QueryResponse, Evento, ExtractedParameters
@@ -59,8 +60,12 @@ class EventsService:
             categorias_solicitadas=params.categorias or []
         )
         
-        # Paso 6: Convertir a modelos Pydantic
-        eventos = await self._convert_to_eventos(eventos_filtrados, request.cp_usuario)
+        # Paso 5b: Post-filtro temporal (descartar eventos fuera del rango)
+        eventos_temporales = self._filtrar_por_fechas(eventos_filtrados, params)
+        logger.info(f"Post-filtro temporal: {len(eventos_temporales)} eventos (de {len(eventos_filtrados)})")
+        
+        # Paso 6: Convertir a modelos Pydantic y asignar nivel_coincidencia
+        eventos = await self._convert_to_eventos(eventos_temporales, request.cp_usuario)
         logger.info(f"Eventos finales: {len(eventos)}")
         
         # Paso 7: Generar respuesta en lenguaje natural
@@ -107,6 +112,49 @@ class EventsService:
             }
         
         return response
+    
+    def _filtrar_por_fechas(
+        self,
+        eventos: List[Dict[str, Any]],
+        params: ExtractedParameters
+    ) -> List[Dict[str, Any]]:
+        """Descartar eventos cuya fecha_inicio no esté en el rango solicitado."""
+        if not params.fechas and not params.fecha_inicio and not params.fecha_fin:
+            return eventos
+        
+        fechas_validas = set()
+        if params.fechas:
+            for f in params.fechas:
+                fechas_validas.add(f if isinstance(f, date) else date.fromisoformat(str(f)))
+        elif params.fecha_inicio or params.fecha_fin:
+            from datetime import timedelta
+            ini = params.fecha_inicio or params.fecha_fin
+            fin = params.fecha_fin or params.fecha_inicio
+            if isinstance(ini, str):
+                ini = date.fromisoformat(ini)
+            if isinstance(fin, str):
+                fin = date.fromisoformat(fin)
+            d = ini
+            while d <= fin:
+                fechas_validas.add(d)
+                d += timedelta(days=1)
+        
+        if not fechas_validas:
+            return eventos
+        
+        resultado = []
+        for ev in eventos:
+            fi = ev.get('fecha_inicio')
+            if not fi:
+                continue
+            if hasattr(fi, 'date'):
+                fi = fi.date()
+            elif isinstance(fi, str):
+                fi = date.fromisoformat(fi[:10]) if len(fi) >= 10 else None
+            if fi and fi in fechas_validas:
+                resultado.append(ev)
+        
+        return resultado
     
     def _normalizar_categoria_a_slug(self, nombre: str) -> str:
         """Convierte nombre de categoría (ej. 'Cultura', 'Gastronomía') a slug (cultura, gastronomia)."""
@@ -157,41 +205,57 @@ class EventsService:
         conceptos_text = " ".join(conceptos)
         user_embedding = await ai_service.generate_embedding(conceptos_text)
         
-        # Calcular similitud con cada evento
+        # Cache de embeddings por categoría (evita llamadas repetidas)
+        slug_to_expanded = {
+            "cultura": "cultura arte museo exposición concierto",
+            "deportes": "deportes ejercicio actividad física",
+            "ocio": "ocio entretenimiento diversión",
+            "infantil": "infantil niños familia",
+            "formacion": "formación taller curso aprendizaje",
+            "gastronomia": "gastronomía comida restaurante culinaria",
+            "musica": "música concierto musical",
+            "naturaleza": "naturaleza jardinería plantas aire libre"
+        }
+        cat_embeddings_cache: Dict[str, List[float]] = {}
+        
+        # Calcular similitud con cada evento (categoría 40%, tags 60%)
         eventos_con_score = []
         for evento in eventos_raw:
-            # Obtener embedding del evento según idioma
             embedding_json = evento.get('tags_embedding_json')
+            sim_tags = 0.3  # default si no hay embedding
             
-            if not embedding_json:
-                # Si no hay embedding, asignar score bajo
-                evento['similitud_score'] = 0.3
-                if slugs_solicitados and evento.get("categoria_slug") in slugs_solicitados:
-                    evento["similitud_score"] = max(evento["similitud_score"], 0.45)
-                eventos_con_score.append(evento)
-                continue
+            if embedding_json:
+                try:
+                    if isinstance(embedding_json, str):
+                        evento_embedding = json.loads(embedding_json)
+                    else:
+                        evento_embedding = embedding_json
+                    sim_tags = ai_service.cosine_similarity(user_embedding, evento_embedding)
+                except Exception as e:
+                    logger.warning(f"Error al procesar embedding del evento {evento.get('id_unico_evento')}: {e}")
             
-            try:
-                # Parsear embedding
-                if isinstance(embedding_json, str):
-                    evento_embedding = json.loads(embedding_json)
-                else:
-                    evento_embedding = embedding_json
-                
-                # Calcular similitud coseno
-                similitud = ai_service.cosine_similarity(user_embedding, evento_embedding)
-                evento['similitud_score'] = similitud
-                # Refuerzo por coincidencia de categoría (categoría > tags)
-                if slugs_solicitados and evento.get("categoria_slug") in slugs_solicitados:
-                    evento["similitud_score"] = max(evento["similitud_score"], 0.45)
-                eventos_con_score.append(evento)
-                
-            except Exception as e:
-                logger.warning(f"Error al procesar embedding del evento {evento.get('id_unico_evento')}: {e}")
-                evento['similitud_score'] = 0.3
-                if slugs_solicitados and evento.get("categoria_slug") in slugs_solicitados:
-                    evento["similitud_score"] = max(evento["similitud_score"], 0.45)
-                eventos_con_score.append(evento)
+            # Similitud por categoría de producto (peso 40%)
+            sim_cat = 0.0
+            cat_slug = evento.get('categoria_slug')
+            if cat_slug:
+                if cat_slug not in cat_embeddings_cache:
+                    cat_text = slug_to_expanded.get(cat_slug, cat_slug)
+                    cat_embeddings_cache[cat_slug] = await ai_service.generate_embedding(cat_text)
+                cat_embedding = cat_embeddings_cache[cat_slug]
+                sim_cat = ai_service.cosine_similarity(user_embedding, cat_embedding)
+            
+            # Combinar: 40% categoría, 60% tags (categoría más relevante que tags)
+            if cat_slug:
+                score = 0.4 * sim_cat + 0.6 * sim_tags
+            else:
+                score = sim_tags
+            
+            # Refuerzo si categoría solicitada coincide
+            if slugs_solicitados and cat_slug in slugs_solicitados:
+                score = max(score, 0.45)
+            
+            evento['similitud_score'] = round(score, 4)
+            eventos_con_score.append(evento)
         
         # Ordenar por similitud descendente (sin filtrar por umbral)
         # Esto permite mostrar todos los eventos: primero los que pasan el filtro, luego los que no
@@ -263,6 +327,17 @@ class EventsService:
                 #     logger.warning(f"Evento {evento_raw.get('id_unico_evento')} sin título, saltando")
                 #     continue
                 
+                # Asignar nivel_coincidencia según score
+                score = evento_raw.get('similitud_score', 0.0)
+                if score >= 0.55:
+                    nivel = "mayor"
+                elif score >= 0.40:
+                    nivel = "templada"
+                elif score >= 0.25:
+                    nivel = "baja"
+                else:
+                    nivel = "muy_poca"
+                
                 # Crear modelo Evento
                 evento = Evento(
                     id_unico_evento=str(evento_raw['id_unico_evento']),
@@ -284,7 +359,8 @@ class EventsService:
                     url_evento=evento_raw.get('url_evento'),
                     url_imagen=evento_raw.get('url_imagen'),
                     distancia_km=round(distancia_km, 2) if distancia_km else None,
-                    similitud_score=round(evento_raw.get('similitud_score', 0.0), 3)
+                    similitud_score=round(evento_raw.get('similitud_score', 0.0), 3),
+                    nivel_coincidencia=nivel
                 )
                 
                 eventos.append(evento)

@@ -68,16 +68,26 @@ class AnalysisService:
             except Exception as e:
                 logger.warning(f"Error al analizar tags del evento {evento.get('id_unico_evento')}: {e}")
         
-        # Analizar similitud por categoría (si existe en los tags)
-        # Nota: Las categorías están en los tags, buscar las que empiecen con mayúscula
-        categorias = [tag for tag in (tags if tags_json else []) if tag and tag[0].isupper()]
-        if categorias:
-            # Usar la primera categoría encontrada
-            categoria = categorias[0]
-            cat_embedding = await ai_service.generate_embedding(categoria)
+        # Analizar similitud por categoría de producto (categoria_slug de la BD)
+        # La categoría de producto tiene más peso que los tags
+        categoria_slug = evento.get('categoria_slug')
+        if categoria_slug:
+            # Expandir slug a nombre legible para embedding (ej: naturaleza -> naturaleza, jardinería)
+            slug_to_expanded = {
+                "cultura": "cultura arte museo exposición concierto",
+                "deportes": "deportes ejercicio actividad física",
+                "ocio": "ocio entretenimiento diversión",
+                "infantil": "infantil niños familia",
+                "formacion": "formación taller curso aprendizaje",
+                "gastronomia": "gastronomía comida restaurante culinaria",
+                "musica": "música concierto musical",
+                "naturaleza": "naturaleza jardinería plantas aire libre"
+            }
+            cat_text = slug_to_expanded.get(categoria_slug, categoria_slug)
+            cat_embedding = await ai_service.generate_embedding(cat_text)
             similitud_cat = ai_service.cosine_similarity(pregunta_embedding, cat_embedding)
             analisis['similitud_categoria'] = {
-                "categoria": categoria,
+                "categoria": categoria_slug,
                 "similitud": round(similitud_cat, 3)
             }
         
@@ -123,17 +133,21 @@ class AnalysisService:
                 "severidad": "ALTA"
             })
         
-        # Problema 2: Categoría con baja similitud
+        # Categoría de producto: siempre incluir en diagnóstico (más relevante que tags)
         if analisis['similitud_categoria']:
             sim_cat = analisis['similitud_categoria']['similitud']
+            cat_nombre = analisis['similitud_categoria']['categoria']
+            diagnostico['impacto_categoria'] = {
+                "categoria": cat_nombre,
+                "similitud": sim_cat,
+                "aporta": "alta" if sim_cat >= 0.4 else "media" if sim_cat >= 0.3 else "baja"
+            }
             if sim_cat < 0.3:
                 diagnostico['problemas'].append({
                     "tipo": "CATEGORIA_IRRELEVANTE",
-                    "descripcion": f"Categoría '{analisis['similitud_categoria']['categoria']}' tiene similitud muy baja ({sim_cat})",
+                    "descripcion": f"Categoría '{cat_nombre}' tiene similitud muy baja ({sim_cat}), reduce la puntuación",
                     "severidad": "ALTA"
                 })
-                
-                # Sugerir cambio de categoría
                 mejor_categoria = self._sugerir_categoria(analisis['similitud_por_tag'], conceptos)
                 if mejor_categoria:
                     diagnostico['soluciones'].append({
@@ -141,7 +155,7 @@ class AnalysisService:
                         "tipo": "cambiar_categoria",
                         "accion": f"Cambiar categoría a '{mejor_categoria}'",
                         "impacto_estimado": "+0.20",
-                        "categoria_actual": analisis['similitud_categoria']['categoria'],
+                        "categoria_actual": cat_nombre,
                         "categoria_sugerida": mejor_categoria
                     })
                     diagnostico['score_estimado_con_mejoras'] += 0.20

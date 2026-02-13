@@ -77,6 +77,10 @@ class Evento(BaseModel):
     url_imagen: Optional[str] = None
     distancia_km: Optional[float] = Field(default=None, description="Distancia desde el usuario")
     similitud_score: Optional[float] = Field(default=None, description="Score de similitud semántica")
+    nivel_coincidencia: Optional[str] = Field(
+        default=None,
+        description="Nivel: mayor, templada, baja, muy_poca"
+    )
 
 
 class QueryResponse(BaseModel):
