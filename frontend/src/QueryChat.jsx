@@ -126,6 +126,13 @@ function QueryChat({ onAnalysisUpdate }) {
               const n = ev.nivel_coincidencia || 'muy_poca'
               if (porNivel[n] && porNivel[n].length < 10) porNivel[n].push(ev)
             })
+            Object.keys(porNivel).forEach(n => {
+              porNivel[n].sort((a, b) => {
+                const fa = a.fecha_inicio ? new Date(a.fecha_inicio).getTime() : Infinity
+                const fb = b.fecha_inicio ? new Date(b.fecha_inicio).getTime() : Infinity
+                return fa - fb
+              })
+            })
             return (
               <div className="chat-events-list">
                 {BLOQUES.map(({ nivel, titulo, clase, max }) => {

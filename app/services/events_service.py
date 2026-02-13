@@ -113,47 +113,58 @@ class EventsService:
         
         return response
     
+    def _parse_fecha_inicio(self, ev: Dict[str, Any]) -> Optional[date]:
+        """Extrae fecha_inicio de un evento como date o None."""
+        fi = ev.get('fecha_inicio')
+        if not fi:
+            return None
+        if hasattr(fi, 'date'):
+            return fi.date()
+        if isinstance(fi, str) and len(fi) >= 10:
+            return date.fromisoformat(fi[:10])
+        return None
+
     def _filtrar_por_fechas(
         self,
         eventos: List[Dict[str, Any]],
         params: ExtractedParameters
     ) -> List[Dict[str, Any]]:
-        """Descartar eventos cuya fecha_inicio no esté en el rango solicitado."""
-        if not params.fechas and not params.fecha_inicio and not params.fecha_fin:
-            return eventos
-        
-        fechas_validas = set()
-        if params.fechas:
-            for f in params.fechas:
-                fechas_validas.add(f if isinstance(f, date) else date.fromisoformat(str(f)))
-        elif params.fecha_inicio or params.fecha_fin:
-            from datetime import timedelta
-            ini = params.fecha_inicio or params.fecha_fin
-            fin = params.fecha_fin or params.fecha_inicio
-            if isinstance(ini, str):
-                ini = date.fromisoformat(ini)
-            if isinstance(fin, str):
-                fin = date.fromisoformat(fin)
-            d = ini
-            while d <= fin:
-                fechas_validas.add(d)
-                d += timedelta(days=1)
-        
-        if not fechas_validas:
-            return eventos
-        
+        """Descartar eventos anteriores a hoy y fuera del rango solicitado."""
+        hoy = date.today()
         resultado = []
+
         for ev in eventos:
-            fi = ev.get('fecha_inicio')
-            if not fi:
+            fi = self._parse_fecha_inicio(ev)
+            # Siempre descartar eventos anteriores a la fecha actual
+            if fi and fi < hoy:
                 continue
-            if hasattr(fi, 'date'):
-                fi = fi.date()
-            elif isinstance(fi, str):
-                fi = date.fromisoformat(fi[:10]) if len(fi) >= 10 else None
-            if fi and fi in fechas_validas:
+            # Si no hay fecha, mantener (eventos sin fecha no se descartan por antigüedad)
+            if not fi:
                 resultado.append(ev)
-        
+                continue
+
+            # Si hay rango de fechas en params, filtrar por él
+            if params.fechas or params.fecha_inicio or params.fecha_fin:
+                fechas_validas = set()
+                if params.fechas:
+                    for f in params.fechas:
+                        fechas_validas.add(f if isinstance(f, date) else date.fromisoformat(str(f)))
+                elif params.fecha_inicio or params.fecha_fin:
+                    from datetime import timedelta
+                    ini = params.fecha_inicio or params.fecha_fin
+                    fin = params.fecha_fin or params.fecha_inicio
+                    if isinstance(ini, str):
+                        ini = date.fromisoformat(ini)
+                    if isinstance(fin, str):
+                        fin = date.fromisoformat(fin)
+                    d = ini
+                    while d <= fin:
+                        fechas_validas.add(d)
+                        d += timedelta(days=1)
+                if fechas_validas and fi not in fechas_validas:
+                    continue
+            resultado.append(ev)
+
         return resultado
     
     def _normalizar_categoria_a_slug(self, nombre: str) -> str:
