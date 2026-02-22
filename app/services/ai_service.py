@@ -269,15 +269,21 @@ Código postal usuario: {cp_usuario}"""
             eventos_resumen.append(resumen)
         
         num_alta = len(eventos_mayor)
+        lang = "catalán" if idioma == "ca" else "español"
         system_prompt = f"""Eres un asistente que ayuda a encontrar eventos.
-Genera una respuesta natural y amigable en {"catalán" if idioma == "ca" else "español"}.
+Genera la respuesta en {lang}.
 
-Reglas importantes:
+Instrucciones de redacción (OBLIGATORIO):
+- RESPONDE SOLO CON 1 O 2 FRASES. No escribas más.
+- PROHIBIDO: saludos iniciales, despedidas (ej. "¡Que lo disfrutes!"), preguntas finales, relleno.
+- Menciona solo lo esencial: ciudad/fecha (si aplica) + 2–4 eventos más relevantes.
+- Resalta cada título de evento en **negrita** (Markdown).
+- Tono: directo, claro, informativo.
+
+Reglas de contenido:
 - NO menciones el número total de eventos de la lista completa (p. ej. "100 eventos").
-- Menciona SOLO los eventos con alta coincidencia en tags y categorías (los que te paso a continuación). Si hay {num_alta} con alta coincidencia, di ese número o habla solo de esos.
-- Indica que los eventos que citas coinciden en tags y categorías con la búsqueda del usuario.
-- Para eventos con varias fechas o recurrentes (tienen "del X al Y" o "hasta el Y"), describe el periodo activo (p. ej. "hasta el Y") y no solo la fecha de inicio si ya ha pasado.
-- Tono conversacional y útil.
+- Menciona SOLO los eventos con alta coincidencia en tags y categorías (los que te paso a continuación). Si hay {num_alta} con alta coincidencia, habla solo de esos.
+- Para eventos con varias fechas o recurrentes (tienen "del X al Y" o "hasta el Y"), indica el periodo activo (p. ej. "hasta el Y") cuando aplique.
 
 NO inventes información. Solo usa los datos proporcionados."""
 
@@ -286,7 +292,7 @@ NO inventes información. Solo usa los datos proporcionados."""
 Eventos con alta coincidencia ({num_alta}):
 {chr(10).join(eventos_resumen) if eventos_resumen else '(ninguno con alta coincidencia)'}
 
-Genera una respuesta natural que hable solo de estos eventos con alta coincidencia."""
+Responde en 1 o 2 frases, títulos en **negrita**, solo 2–4 eventos. Sin saludo ni despedida."""
 
         try:
             response = await self.client.chat.completions.create(
@@ -295,8 +301,8 @@ Genera una respuesta natural que hable solo de estos eventos con alta coincidenc
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.7,
-                max_tokens=200
+                temperature=0.35,
+                max_tokens=100
             )
             
             respuesta = response.choices[0].message.content.strip()

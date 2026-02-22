@@ -53,12 +53,23 @@ if (Get-Command docker -ErrorAction SilentlyContinue) {
         $ErrorActionPreference = "Stop"
 
         if ($dockerExit -eq 0) {
-            Start-Sleep -Seconds 2
-            $psOut = docker compose ps mysql 2>&1
-            if ($psOut -match "Up|running") {
-                Write-Host "MySQL en marcha (contenedor activo)." -ForegroundColor Green
-            } else {
-                Write-Host "MySQL arrancado. Si la API falla al conectar, ejecuta: docker compose ps" -ForegroundColor Green
+            Write-Host "Esperando a que MySQL esté listo para conexiones..." -ForegroundColor DarkGray
+            $maxWait = 45
+            $waited = 0
+            $mysqlReady = $false
+            while ($waited -lt $maxWait) {
+                $health = docker inspect --format='{{.State.Health.Status}}' events-mysql 2>&1
+                if ($LASTEXITCODE -eq 0 -and $health -eq "healthy") {
+                    $mysqlReady = $true
+                    Write-Host "MySQL listo (healthy)." -ForegroundColor Green
+                    break
+                }
+                Start-Sleep -Seconds 3
+                $waited += 3
+                Write-Host "  Esperando MySQL... ($waited s)" -ForegroundColor DarkGray
+            }
+            if (-not $mysqlReady) {
+                Write-Host "MySQL arrancado pero aún no healthy. La API puede tardar en conectar." -ForegroundColor DarkYellow
             }
         } else {
             Write-Host "Error al levantar MySQL con Docker:" -ForegroundColor Red
