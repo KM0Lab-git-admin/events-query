@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",                 # en Railway no suele existir; si no está, no pasa nada
         env_file_encoding="utf-8",
-        case_sensitive=False
+        case_sensitive=False,
+        extra="ignore",                  # RAILWAY_DB_* y otras vars solo para scripts PowerShell
     )
 
     # Database Configuration
