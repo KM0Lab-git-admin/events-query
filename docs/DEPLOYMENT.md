@@ -96,7 +96,7 @@ Railway ofrece dos formas de conectar MySQL:
 
 ### 5.2 Crear `.env.railway` (en tu repo local)
 
-Archivo separado para no romper tu `.env` de Docker/local:
+Archivo separado para no romper tu `.env` de Docker/local. Plantilla en el repo: **`.env.railway.example`**. Cópiala a **`.env.railway`** (ignorada por Git) y rellena los valores reales.
 
 ```env
 DB_HOST=caboose.proxy.rlwy.net
@@ -105,8 +105,9 @@ DB_USER=root
 DB_PASSWORD=tu_password_railway
 DB_NAME=railway
 OPENAI_API_KEY=sk-...
-ENVIRONMENT=production
 ```
+
+Opcional: `ENVIRONMENT=production` si lo usas en otros scripts.
 
 ⚠️ Importante:
 - `DB_HOST` solo el hostname, sin `:puerto` ni `/db`.
@@ -116,17 +117,27 @@ ENVIRONMENT=production
 
 ### 5.3 Ejecutar generador fake (local → BD Railway)
 
-PowerShell (recomendado si tu repo lo incluye):
+PowerShell (un solo comando; carga `.env.railway` sola):
 ```powershell
-.un-fake-data-railway.ps1
+.\run-fake-data-railway.ps1
 # o sin limpiar antes
-.un-fake-data-railway.ps1 --no-clear
+.\run-fake-data-railway.ps1 --no-clear
 ```
 
-Alternativa manual (cargando variables y ejecutando script):
+Alternativa manual (Linux/Mac):
+
 ```bash
 export $(cat .env.railway | xargs)  # Linux/Mac
 python scripts/generate_fake_data.py
+```
+
+### 5.4 Solo desplazar fechas en `EVENTO_HORARIOS` (local → BD Railway)
+
+Misma `.env.railway` que arriba. Un solo comando en PowerShell (el script carga el `.env`):
+
+```powershell
+.\run-shift-railway.ps1 --dry-run
+.\run-shift-railway.ps1
 ```
 
 ---
