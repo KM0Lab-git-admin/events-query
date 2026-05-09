@@ -94,30 +94,30 @@ Railway ofrece dos formas de conectar MySQL:
 
 ---
 
-### 5.2 Crear `.env.railway` (en tu repo local)
+### 5.2 Variables para scripts local → BD Railway
 
-Archivo separado para no romper tu `.env` de Docker/local. Plantilla en el repo: **`.env.railway.example`**. Cópiala a **`.env.railway`** (ignorada por Git) y rellena los valores reales.
+**Recomendado (un solo `.env`):** en tu **`.env`** (el de Docker/local, sin tocar `DB_*` que apuntan a `localhost`) añade las claves **`RAILWAY_DB_HOST`**, **`RAILWAY_DB_PORT`**, **`RAILWAY_DB_USER`**, **`RAILWAY_DB_PASSWORD`**, **`RAILWAY_DB_NAME`** con el **host y puerto públicos** del MySQL en Railway (`MYSQL_PUBLIC_URL`). Los scripts `.\run-shift-railway.ps1` y `.\run-fake-data-railway.ps1` cargan primero `.env` y, si existen `RAILWAY_DB_*`, copian esos valores a `DB_*` **solo en el proceso actual** (en disco tu `DB_HOST=localhost` no cambia). `OPENAI_API_KEY` se reutiliza del mismo `.env`.
+
+**Alternativa:** archivo **`.env.railway`** (ignorado por Git) con `DB_*` ya apuntando a Railway. Plantilla: **`.env.railway.example`**.
 
 ```env
-DB_HOST=caboose.proxy.rlwy.net
-DB_PORT=55339
-DB_USER=root
-DB_PASSWORD=tu_password_railway
-DB_NAME=railway
-OPENAI_API_KEY=sk-...
+# Ejemplo RAILWAY_* dentro de .env (no borres tu bloque DB_* local)
+RAILWAY_DB_HOST=caboose.proxy.rlwy.net
+RAILWAY_DB_PORT=55339
+RAILWAY_DB_USER=root
+RAILWAY_DB_PASSWORD=tu_password_railway
+RAILWAY_DB_NAME=railway
 ```
 
-Opcional: `ENVIRONMENT=production` si lo usas en otros scripts.
-
 ⚠️ Importante:
-- `DB_HOST` solo el hostname, sin `:puerto` ni `/db`.
-- `DB_PORT` el puerto **público** (no 3306 salvo que Railway lo indique en Connect).
+- `RAILWAY_DB_HOST` solo el hostname, sin `:puerto` ni `/db`.
+- `RAILWAY_DB_PORT` el puerto **público** (no 3306 salvo que Railway lo indique en Connect).
 
 ---
 
 ### 5.3 Ejecutar generador fake (local → BD Railway)
 
-PowerShell (un solo comando; carga `.env.railway` sola):
+PowerShell (un solo comando; usa `RAILWAY_DB_*` en `.env` o `.env.railway` vía [`load-railway-db-env.ps1`](../load-railway-db-env.ps1)):
 ```powershell
 .\run-fake-data-railway.ps1
 # o sin limpiar antes
@@ -133,7 +133,7 @@ python scripts/generate_fake_data.py
 
 ### 5.4 Solo desplazar fechas en `EVENTO_HORARIOS` (local → BD Railway)
 
-Misma `.env.railway` que arriba. Un solo comando en PowerShell (el script carga el `.env`):
+Misma configuración que **5.2** (`RAILWAY_DB_*` en `.env` o `.env.railway`):
 
 ```powershell
 .\run-shift-railway.ps1 --dry-run
