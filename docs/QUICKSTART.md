@@ -107,6 +107,8 @@ python scripts/shift_horarios_to_future.py --dry-run
 python scripts/shift_horarios_to_future.py
 ```
 
+En **Windows**, con `RAILWAY_DB_*` definidas en tu `.env` para una BD remota: `.\run-shift-railway.ps1` y `.\run-shift-railway.ps1 --dry-run` (ver `docs/DEPLOYMENT.md`).
+
 El script calcula `offset_days` a partir del `MIN(Fecha_Inicio)` y `date.today()` de forma que el nuevo mínimo quede **estrictamente posterior a hoy**, y ajusta `Recurrencia_JSON.regla.finalizacion.valor` en eventos recurrentes. En entornos con datos reales, haz **backup** (`mysqldump`) antes de ejecutarlo.
 
 ---
