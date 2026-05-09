@@ -95,6 +95,20 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 **✅ Backend corriendo en:** http://localhost:8000
 
+#### Datos con fechas antiguas (local)
+
+Si los eventos en `EVENTO_HORARIOS` quedaron con fechas en el pasado (por ejemplo tras varios meses sin regenerar datos fake), las búsquedas por “este fin de semana” devolverán pocos resultados. Puedes **desplazar todas las fechas** el mismo número de días hacia el futuro, sin borrar `EVENTOS_MASTER` ni embeddings:
+
+```bash
+# Vista previa (no escribe en la BD)
+python scripts/shift_horarios_to_future.py --dry-run
+
+# Aplicar cambios (requiere .env con credenciales MySQL)
+python scripts/shift_horarios_to_future.py
+```
+
+El script calcula `offset_days` a partir del `MIN(Fecha_Inicio)` y `date.today()` de forma que el nuevo mínimo quede **estrictamente posterior a hoy**, y ajusta `Recurrencia_JSON.regla.finalizacion.valor` en eventos recurrentes. En entornos con datos reales, haz **backup** (`mysqldump`) antes de ejecutarlo.
+
 ---
 
 ### Paso 2: Frontend (3 minutos)
