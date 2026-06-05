@@ -87,6 +87,19 @@ class DatabaseService:
                 else:
                     return None
     
+    async def execute_insert(
+        self,
+        query: str,
+        params: Optional[tuple] = None,
+    ) -> int:
+        """
+        INSERT (o REPLACE) y devuelve lastrowid (0 si no aplica).
+        """
+        async with self.get_connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(query, params or ())
+                return int(cursor.lastrowid or 0)
+
     async def execute_many(
         self,
         query: str,

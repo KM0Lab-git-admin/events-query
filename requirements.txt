@@ -25,6 +25,12 @@ pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
 httpx==0.25.2
+beautifulsoup4==4.12.3
+lxml==5.3.0
+icalendar==5.0.11
+
+# Imágenes (persist_phase_c, dimensiones/orientación)
+Pillow>=10.4.0
 
 # Development
 black==24.3.0

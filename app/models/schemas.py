@@ -7,6 +7,31 @@ from typing import Optional, List
 from datetime import datetime, date
 
 
+class EventImagenV1(BaseModel):
+    """Imagen asociada a un evento (BINARIOS_STORAGE / API v1)."""
+
+    url: str = Field(description="URL de almacenamiento de la imagen")
+    nombre_archivo: Optional[str] = Field(default=None)
+    tipo_archivo: Optional[str] = Field(default=None)
+    es_principal: bool = Field(default=False)
+    orden: int = Field(default=0)
+    ancho_px: Optional[int] = Field(default=None)
+    alto_px: Optional[int] = Field(default=None)
+    orientacion: Optional[str] = Field(default=None)
+    url_original_externa: Optional[str] = Field(default=None)
+
+
+class EventCategoryDetailV1(BaseModel):
+    """Categoría en detalle de evento."""
+
+    id: int
+    slug: str
+    nombre_es: str
+    nombre_cat: str
+    color_hex: Optional[str] = Field(default=None)
+    icono: Optional[str] = Field(default=None)
+
+
 class QueryRequest(BaseModel):
     """Request para búsqueda de eventos."""
     
@@ -65,6 +90,13 @@ class Evento(BaseModel):
     poblacion_nombre: Optional[str] = Field(default=None, description="Nombre de la población")
     lugar_nombre: Optional[str] = None
     direccion_completa: Optional[str] = None
+    id_recinto: Optional[int] = Field(default=None, description="FK a RECINTOS si existe")
+    recinto_nombre_canonico: Optional[str] = Field(
+        default=None, description="Nombre canónico del lugar (RECINTOS)"
+    )
+    recinto_tipo: Optional[str] = Field(
+        default=None, description="Tipo de recinto: BIBLIOTECA, CENTRO_CULTURAL, etc."
+    )
     fecha_inicio: Optional[date] = None
     fecha_fin: Optional[date] = None
     hora_inicio: Optional[str] = None

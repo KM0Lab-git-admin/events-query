@@ -82,15 +82,14 @@ Esta capa define cómo una IA/scraper debe **insertar y mantener** eventos con t
 
 3) Captura / fuentes  
 - `MAPEO_REDES_POBLACION`  
-- `FUENTES_FAMILIA`
+- `BIBLIOTECA_FUENTES`, `SCRAPING_TARGETS`, `EVENTO_FUENTES`
 
 4) Evento maestro (7 dimensiones)  
 - `EVENTOS_MASTER` como tabla principal
 
-5) Tablas hijas y auditoría  
+5) Tablas hijas  
 - `EVENTO_HORARIOS`  
-- `BINARIOS_STORAGE`  
-- `AUDITORIA_SCRAPING`
+- `BINARIOS_STORAGE`
 
 > Importante: la presencia real de estas tablas depende de tu instancia de BD. Si hoy tu API solo usa el MVP (8 tablas), esta sección funciona como **blueprint** para el módulo de ingesta.
 

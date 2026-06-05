@@ -12,8 +12,8 @@
 > - [Optimización y escala](./INGESTION_OPTIMIZATION.md)
 > - [Operaciones y observabilidad](./INGESTION_OPERATIONS.md)
 >
-> 📌 **Schema SQL del delta**: [`SCHEMA_INGESTION_DELTA.sql`](./SCHEMA_INGESTION_DELTA.sql)
-> 📌 **Schema base del proyecto**: `KM0_Events.sql` + [`DATA_MODEL.md`](./DATA_MODEL.md)
+> 📌 **Schema SQL unificado**: [`SCHEMA_SQL_FINAL.sql`](../SQL/SCHEMA_SQL_FINAL.sql) (init Docker: `scripts/schema.sql`)  
+> 📌 **Modelo documental**: [`DATA_MODEL.md`](./DATA_MODEL.md)
 
 ---
 
@@ -67,7 +67,7 @@ El módulo tiene varios roles conceptuales. Esta es la traducción de cada rol a
 
 ## Tablas existentes reutilizadas
 
-Estas tablas ya estaban en `KM0_Events.sql`. El módulo las usa tal cual o con modificaciones menores (ver sección [Modificaciones](#modificaciones-a-tablas-existentes)).
+Estas tablas forman parte del esquema unificado en [`SCHEMA_SQL_FINAL.sql`](../SQL/SCHEMA_SQL_FINAL.sql). El módulo las usa tal cual o con las extensiones descritas en este documento (ver sección [Modificaciones](#modificaciones-a-tablas-existentes)).
 
 ### `BIBLIOTECA_FUENTES`
 
@@ -156,7 +156,7 @@ Campos relevantes para ingesta:
 
 ## Tablas nuevas añadidas
 
-Definidas en [`SCHEMA_INGESTION_DELTA.sql`](./SCHEMA_INGESTION_DELTA.sql). Aquí va la racional de cada una.
+Definidas en [`SCHEMA_SQL_FINAL.sql`](../SQL/SCHEMA_SQL_FINAL.sql). Aquí va la racional de cada una.
 
 ### `CAPTURAS_RAW`
 
@@ -239,7 +239,7 @@ ID_Unico_Evento: abc123
 
 ## Modificaciones a tablas existentes
 
-Detalle en [`SCHEMA_INGESTION_DELTA.sql`](./SCHEMA_INGESTION_DELTA.sql). Resumen:
+Detalle en [`SCHEMA_SQL_FINAL.sql`](../SQL/SCHEMA_SQL_FINAL.sql). Resumen:
 
 **`SCRAPING_TARGETS`**:
 - Concretar `Tipo_Target` (estaba como placeholder en el SQL original).

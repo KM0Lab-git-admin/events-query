@@ -52,6 +52,9 @@ class QueryBuilder:
             em.Poblacion_Nombre as poblacion_nombre,
             em.Lugar_Nombre as lugar_nombre,
             em.Direccion_Fisica as direccion_completa,
+            em.ID_Recinto as id_recinto,
+            r.Nombre_Canonico as recinto_nombre_canonico,
+            r.Tipo as recinto_tipo,
             eh.Fecha_Inicio as fecha_inicio,
             eh.Fecha_Fin as fecha_fin,
             eh.Hora_Inicio as hora_inicio,
@@ -77,6 +80,7 @@ class QueryBuilder:
         FROM EVENTOS_MASTER em
         INNER JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
         INNER JOIN CODIGOS_POSTALES cp ON em.CP_Evento = cp.CP
+        LEFT JOIN RECINTOS r ON em.ID_Recinto = r.ID_Recinto
         WHERE em.Estado = 'ACTIVO'
         """
         

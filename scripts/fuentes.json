@@ -1,0 +1,17 @@
+[
+  {
+    "poblacion": "Malgrat de Mar",
+    "codigos_postales": ["08380"],
+    "links": [
+      "https://www.ajmalgrat.cat/comunicacio/agenda"
+    ]
+  },
+  {
+    "poblacion": "Blanes",
+    "codigos_postales": ["17300"],
+    "links": [
+      "https://www.blanescostabrava.cat/es/agenda-eventos/",
+      "https://www.blanes.cat/agenda"
+    ]
+  }
+]

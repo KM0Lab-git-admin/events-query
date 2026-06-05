@@ -274,7 +274,7 @@ El módulo se construye en cuatro fases incrementales. Cada fase entrega valor p
 
 Objetivo: validar el pipeline completo con coste cero antes de tocar Apify.
 
-- Schema de las tablas nuevas aplicado (`SCHEMA_INGESTION_DELTA.sql`).
+- Schema unificado aplicado ([`SCHEMA_SQL_FINAL.sql`](../SQL/SCHEMA_SQL_FINAL.sql); init Docker: `scripts/schema.sql`).
 - `HTMLConnector` con cascade completa (HEAD/sitemap, hash dedup, listado filter).
 - `StructuralExtractor` para JSON-LD y selectores CSS.
 - Merge trivial (sin cross-source aún, una sola fuente).

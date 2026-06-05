@@ -1080,3 +1080,22 @@ AUDITORIA_SCRAPING:
 **Coste total**: ~$0.012 de Apify + ~$0.001 de embeddings + 0 de LLM-Vision (ahorrado por el Gate).
 
 **Si el Gate no existiera**: se habrían llamado dos LLMs adicionales por el post de IG (Text + Vision), añadiendo ~$0.02 al coste. A escala de 3.000 municipios con cuentas activas, este ahorro es lo que hace viable el módulo.
+
+---
+
+## CLI de referencia (`app.ingestion.cli`)
+
+Proceso batch genérico (misma `.env` que la API: `DB_*`, `OPENAI_API_KEY` obligatoria en Settings aunque esta CLI no llame a OpenAI):
+
+```bash
+# venv activado; BD con esquema aplicado (SQL/SCHEMA_SQL_FINAL.sql)
+python -m app.ingestion.cli --url "https://ejemplo.cat/ruta/agenda" --cp 08380 --ciudad-id 1 --poblacion "Malgrat de Mar"
+
+# Sin MySQL (solo fetch + extract + merge en memoria)
+python -m app.ingestion.cli --url "https://ejemplo.cat/ruta/agenda" --dry-run
+```
+
+Si falla la conexión (`Can't connect to MySQL server on 'localhost'`): arranca MySQL o ejecuta `docker compose up -d mysql` en este repo y usa en `.env` `DB_HOST=127.0.0.1` (puerto 3306 mapeado).
+
+Extractores probados en cadena: **iCal** (cuerpo o `Content-Type`), **JSON-LD** (`Event`), **HTML** (`<time datetime>` + heurística). La capa **Embedder** no se ejecuta aquí; rellenar `Tags_Embedding_*` con otro job si hace falta.
+

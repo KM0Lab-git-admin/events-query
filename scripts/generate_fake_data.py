@@ -1,7 +1,12 @@
 """
-Script para generar datos fake para la base de datos Events Query API.
-Genera eventos únicos para Malgrat de Mar y Blanes (sin duplicados de título).
-Incluye embeddings generados con OpenAI.
+Único punto de entrada para datos fake (ID_Usuario_Carga = fake_data_generator_v2).
+
+La API NO genera datos fake al arrancar. Ejecutar explícitamente:
+
+    python scripts/generate_fake_data.py
+
+Genera eventos para Malgrat de Mar y Blanes (sin duplicados de título)
+e incluye embeddings con OpenAI. Opción --no-clear para no vaciar la BD antes.
 """
 
 import sys

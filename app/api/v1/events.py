@@ -2,16 +2,20 @@
 Events endpoints - List, filter, and retrieve events.
 """
 
+import json
 import logging
-from datetime import date, datetime, timedelta
-from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, status, Query, Request, Path
+from datetime import date, timedelta
+from typing import Any, Dict, List, Optional
+
+import aiomysql
+from fastapi import APIRouter, HTTPException, Path, Query, Request, status
 from fastapi.responses import ORJSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from app.services import db_service
 from app.models.schemas import ErrorResponse
+from app.services import db_service
+from app.services.event_binarios import fetch_imagenes_por_eventos, merge_imagenes_en_eventos
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,45 @@ router = APIRouter()
 
 # Supported postal codes
 POBLACIONES_SOPORTADAS_CP = ("08380", "17300")
+
+
+async def _attach_imagenes(conn: Any, eventos: List[Dict[str, Any]]) -> None:
+    ids = [e["id"] for e in eventos if e.get("id")]
+    img_map = await fetch_imagenes_por_eventos(conn, ids) if ids else {}
+    merge_imagenes_en_eventos(eventos, img_map)
+
+
+def _tags_from_db(val: Any) -> List[Any]:
+    if val is None:
+        return []
+    if isinstance(val, (list, tuple)):
+        return list(val)
+    if isinstance(val, str):
+        try:
+            return json.loads(val) if val.strip() else []
+        except (ValueError, TypeError):
+            return []
+    return []
+
+
+def _coordenadas_from_db(val: Any) -> Optional[Dict[str, Any]]:
+    if val is None:
+        return None
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            parsed = json.loads(val.decode())
+            return parsed if isinstance(parsed, dict) else None
+        except (ValueError, TypeError, UnicodeDecodeError):
+            return None
+    if isinstance(val, str):
+        try:
+            parsed = json.loads(val)
+            return parsed if isinstance(parsed, dict) else None
+        except (ValueError, TypeError):
+            return None
+    return None
 
 
 @router.get(
@@ -43,177 +86,161 @@ POBLACIONES_SOPORTADAS_CP = ("08380", "17300")
                                 "poblacion": "Malgrat de Mar",
                                 "fecha_inicio": "2026-02-07",
                                 "es_gratuito": True,
-                                "categorias": ["musica"]
+                                "categorias": ["musica"],
+                                "imagen_url": "https://example.com/a.jpg",
+                                "imagenes": [],
                             }
                         ],
                         "total": 150,
                         "page": 1,
                         "page_size": 20,
-                        "total_pages": 8
+                        "total_pages": 8,
                     }
                 }
-            }
+            },
         },
         400: {"model": ErrorResponse, "description": "Invalid parameters"},
         429: {"description": "Too many requests - Rate limit exceeded"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
+        500: {"model": ErrorResponse, "description": "Internal server error"},
+    },
 )
 @limiter.limit("100/minute")
 async def list_events(
     request: Request,
     page: int = Query(1, ge=1, description="Page number (starts at 1)"),
     page_size: int = Query(20, ge=1, le=100, description="Items per page (max 100)"),
-    poblacion: Optional[str] = Query(None, description="Filter by town name (e.g., 'Malgrat de Mar', 'Blanes')"),
-    categoria: Optional[str] = Query(None, description="Filter by category slug (e.g., 'cultura', 'deportes')"),
-    fecha_desde: Optional[date] = Query(None, description="Start date filter (YYYY-MM-DD), defaults to today"),
-    fecha_hasta: Optional[date] = Query(None, description="End date filter (YYYY-MM-DD), defaults to +30 days"),
+    poblacion: Optional[str] = Query(
+        None, description="Filter by town name (e.g., 'Malgrat de Mar', 'Blanes')"
+    ),
+    categoria: Optional[str] = Query(
+        None, description="Filter by category slug (e.g., 'cultura', 'deportes')"
+    ),
+    fecha_desde: Optional[date] = Query(
+        None, description="Start date filter (YYYY-MM-DD), defaults to today"
+    ),
+    fecha_hasta: Optional[date] = Query(
+        None, description="End date filter (YYYY-MM-DD), defaults to +30 days"
+    ),
     es_gratuito: Optional[bool] = Query(None, description="Filter free events only"),
-    search: Optional[str] = Query(None, description="Search in title and tags")
+    search: Optional[str] = Query(None, description="Search in title and tags"),
 ) -> Dict[str, Any]:
     """
     List events with pagination and filters.
-    
-    **Rate Limit:** 100 requests per minute
-    
-    **Pagination:**
-    - `page`: Page number (starts at 1)
-    - `page_size`: Items per page (default 20, max 100)
-    
-    **Filters:**
-    - `poblacion`: Town name (Malgrat de Mar, Blanes)
-    - `categoria`: Category slug (cultura, deportes, ocio, infantil, etc.)
-    - `fecha_desde`: Start date (defaults to today)
-    - `fecha_hasta`: End date (defaults to today + 30 days)
-    - `es_gratuito`: Filter free events (true/false)
-    - `search`: Text search in titles and tags
-    
-    **Default behavior:**
-    - Without date filters, shows events from today to +30 days
-    - Results ordered by date (ascending)
-    
-    **Example:**
-    ```
-    GET /api/v1/events?page=1&page_size=20&poblacion=Malgrat%20de%20Mar&es_gratuito=true
-    ```
     """
     try:
-        # Default date filters: today to +30 days
         if fecha_desde is None:
             fecha_desde = date.today()
         if fecha_hasta is None:
             fecha_hasta = date.today() + timedelta(days=30)
-        
-        # Calculate offset
+
         offset = (page - 1) * page_size
-        
-        # Build query
+
         where_clauses = ["em.Estado = 'ACTIVO'", "em.CP_Evento IN (%s, %s)"]
-        params = list(POBLACIONES_SOPORTADAS_CP)
-        
-        # Date filters
+        params: List[Any] = list(POBLACIONES_SOPORTADAS_CP)
+
         where_clauses.append("eh.Fecha_Inicio >= %s")
         params.append(fecha_desde)
         where_clauses.append("eh.Fecha_Inicio <= %s")
         params.append(fecha_hasta)
-        
-        # Town filter
+
         if poblacion:
             where_clauses.append("em.Poblacion_Nombre = %s")
             params.append(poblacion)
-        
-        # Category filter
+
         if categoria:
             where_clauses.append("c.Slug = %s")
             params.append(categoria)
-        
-        # Free events filter
+
         if es_gratuito is not None:
             where_clauses.append("em.Es_Gratuito = %s")
             params.append(es_gratuito)
-        
-        # Search filter
+
         if search:
             search_pattern = f"%{search}%"
-            where_clauses.append("(em.Titulo_ES LIKE %s OR em.Titulo_CAT LIKE %s OR em.Tags_ES LIKE %s OR em.Tags_CAT LIKE %s)")
+            where_clauses.append(
+                "(em.Titulo_ES LIKE %s OR em.Titulo_CAT LIKE %s OR "
+                "CAST(em.Tags_ES AS CHAR) LIKE %s OR CAST(em.Tags_CAT AS CHAR) LIKE %s)"
+            )
             params.extend([search_pattern, search_pattern, search_pattern, search_pattern])
-        
+
         where_clause = " AND ".join(where_clauses)
-        
-        # Count query
+
         count_query = f"""
-        SELECT COUNT(DISTINCT em.ID_Unico_Evento)
+        SELECT COUNT(DISTINCT em.ID_Unico_Evento) AS total
         FROM EVENTOS_MASTER em
         LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
         LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
         LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
         WHERE {where_clause}
         """
-        
-        # Data query
+
         data_query = f"""
-        SELECT 
-            em.ID_Unico_Evento as id,
-            em.Titulo_ES as titulo_es,
-            em.Titulo_CAT as titulo_cat,
-            em.Desc_Corta_ES as descripcion_corta_es,
-            em.Desc_Corta_CAT as descripcion_corta_cat,
-            em.CP_Evento as cp,
-            em.Poblacion_Nombre as poblacion,
-            em.Lugar_Nombre as lugar,
-            em.Es_Gratuito as es_gratuito,
-            em.Precio_Euros as precio,
-            em.Imagen_Principal_URL as imagen_url,
-            MIN(eh.Fecha_Inicio) as fecha_inicio,
-            MIN(eh.Hora_Inicio) as hora_inicio,
-            GROUP_CONCAT(DISTINCT c.Slug) as categorias_slugs,
-            GROUP_CONCAT(DISTINCT c.Nombre_ES) as categorias_es
+        SELECT
+            em.ID_Unico_Evento AS id,
+            em.Titulo_ES AS titulo_es,
+            em.Titulo_CAT AS titulo_cat,
+            LEFT(COALESCE(em.Desc_Larga_ES, ''), 400) AS descripcion_corta_es,
+            LEFT(COALESCE(em.Desc_Larga_CAT, ''), 400) AS descripcion_corta_cat,
+            em.CP_Evento AS cp,
+            em.Poblacion_Nombre AS poblacion,
+            em.Lugar_Nombre AS lugar,
+            em.Es_Gratuito AS es_gratuito,
+            em.Precio_Euros AS precio,
+            em.Imagen_Principal_URL AS imagen_url,
+            MIN(eh.Fecha_Inicio) AS fecha_inicio,
+            MIN(eh.Hora_Inicio) AS hora_inicio,
+            GROUP_CONCAT(DISTINCT c.Slug ORDER BY c.Slug) AS categorias_slugs,
+            GROUP_CONCAT(DISTINCT c.Nombre_ES ORDER BY c.Slug) AS categorias_es
         FROM EVENTOS_MASTER em
         LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
         LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
         LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
         WHERE {where_clause}
-        GROUP BY em.ID_Unico_Evento, em.Titulo_ES, em.Titulo_CAT, em.Desc_Corta_ES, em.Desc_Corta_CAT,
-                 em.CP_Evento, em.Poblacion_Nombre, em.Lugar_Nombre, em.Es_Gratuito, em.Precio_Euros, em.Imagen_Principal_URL
+        GROUP BY em.ID_Unico_Evento
         ORDER BY fecha_inicio ASC, em.Titulo_ES ASC
         LIMIT %s OFFSET %s
         """
-        
+
         async with db_service.get_connection() as conn:
-            async with conn.cursor() as cursor:
-                # Get total count
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
                 await cursor.execute(count_query, params)
                 total_row = await cursor.fetchone()
-                total = total_row[0] if total_row else 0
-                
-                # Get data
+                total = int(total_row["total"]) if total_row and total_row.get("total") is not None else 0
+
                 data_params = params + [page_size, offset]
                 await cursor.execute(data_query, data_params)
-                rows = await cursor.fetchall()
-                
+                rows = await cursor.fetchall() or []
+
                 eventos = []
                 for row in rows:
-                    eventos.append({
-                        "id": row[0],
-                        "titulo_es": row[1],
-                        "titulo_cat": row[2],
-                        "descripcion_corta_es": row[3],
-                        "descripcion_corta_cat": row[4],
-                        "cp": row[5],
-                        "poblacion": row[6],
-                        "lugar": row[7],
-                        "es_gratuito": bool(row[8]),
-                        "precio": float(row[9]) if row[9] else None,
-                        "imagen_url": row[10],
-                        "fecha_inicio": str(row[11]) if row[11] else None,
-                        "hora_inicio": str(row[12]) if row[12] else None,
-                        "categorias": row[13].split(',') if row[13] else [],
-                        "categorias_nombres": row[14].split(',') if row[14] else []
-                    })
-                
-                # Calculate pagination metadata
-                total_pages = (total + page_size - 1) // page_size
-                
+                    slug_blob = row.get("categorias_slugs") or ""
+                    cats = [s for s in slug_blob.split(",") if s] if slug_blob else []
+                    nombre_blob = row.get("categorias_es") or ""
+                    cats_nom = [s for s in nombre_blob.split(",") if s] if nombre_blob else []
+                    eventos.append(
+                        {
+                            "id": row["id"],
+                            "titulo_es": row["titulo_es"],
+                            "titulo_cat": row["titulo_cat"],
+                            "descripcion_corta_es": row["descripcion_corta_es"],
+                            "descripcion_corta_cat": row["descripcion_corta_cat"],
+                            "cp": row["cp"],
+                            "poblacion": row["poblacion"],
+                            "lugar": row["lugar"],
+                            "es_gratuito": bool(row["es_gratuito"]),
+                            "precio": float(row["precio"]) if row.get("precio") is not None else None,
+                            "imagen_url": row.get("imagen_url"),
+                            "fecha_inicio": str(row["fecha_inicio"]) if row.get("fecha_inicio") else None,
+                            "hora_inicio": str(row["hora_inicio"]) if row.get("hora_inicio") else None,
+                            "categorias": cats,
+                            "categorias_nombres": cats_nom,
+                        }
+                    )
+
+                await _attach_imagenes(conn, eventos)
+
+                total_pages = (total + page_size - 1) // page_size if page_size else 0
+
                 return {
                     "data": eventos,
                     "total": total,
@@ -221,14 +248,212 @@ async def list_events(
                     "page_size": page_size,
                     "total_pages": total_pages,
                     "has_next": page < total_pages,
-                    "has_prev": page > 1
+                    "has_prev": page > 1,
                 }
-                
+
     except Exception as e:
         logger.error(f"Error listing events: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error retrieving events"
+            detail="Error retrieving events",
+        )
+
+
+@router.get(
+    "/events/today",
+    response_class=ORJSONResponse,
+    summary="Get today's events",
+    description="Retrieve events happening today (includes multi-day schedules overlapping today)",
+    responses={
+        200: {
+            "description": "Today's events retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "data": [],
+                        "total": 0,
+                        "fecha": "2026-02-06",
+                    }
+                }
+            },
+        },
+        429: {"description": "Too many requests - Rate limit exceeded"},
+        500: {"model": ErrorResponse, "description": "Internal server error"},
+    },
+)
+@limiter.limit("200/minute")
+async def get_today_events(request: Request) -> Dict[str, Any]:
+    try:
+        today = date.today()
+
+        query = """
+        SELECT
+            em.ID_Unico_Evento AS id,
+            em.Titulo_ES AS titulo_es,
+            em.Titulo_CAT AS titulo_cat,
+            em.CP_Evento AS cp,
+            em.Poblacion_Nombre AS poblacion,
+            em.Lugar_Nombre AS lugar,
+            em.Es_Gratuito AS es_gratuito,
+            em.Precio_Euros AS precio,
+            em.Imagen_Principal_URL AS imagen_url,
+            MIN(eh.Hora_Inicio) AS hora_inicio,
+            MAX(eh.Hora_Fin) AS hora_fin,
+            GROUP_CONCAT(DISTINCT c.Slug ORDER BY c.Slug) AS categorias
+        FROM EVENTOS_MASTER em
+        JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
+        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
+        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
+        WHERE em.Estado = 'ACTIVO'
+          AND em.CP_Evento IN (%s, %s)
+          AND (%s BETWEEN eh.Fecha_Inicio AND COALESCE(eh.Fecha_Fin, eh.Fecha_Inicio))
+        GROUP BY em.ID_Unico_Evento
+        ORDER BY MIN(eh.Hora_Inicio) ASC, em.Titulo_ES ASC
+        """
+
+        async with db_service.get_connection() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
+                await cursor.execute(query, (*POBLACIONES_SOPORTADAS_CP, today))
+                rows = await cursor.fetchall() or []
+
+                eventos = []
+                for row in rows:
+                    cat_blob = row.get("categorias") or ""
+                    cats = [s for s in cat_blob.split(",") if s] if cat_blob else []
+                    eventos.append(
+                        {
+                            "id": row["id"],
+                            "titulo_es": row["titulo_es"],
+                            "titulo_cat": row["titulo_cat"],
+                            "cp": row["cp"],
+                            "poblacion": row["poblacion"],
+                            "lugar": row["lugar"],
+                            "es_gratuito": bool(row["es_gratuito"]),
+                            "precio": float(row["precio"]) if row.get("precio") is not None else None,
+                            "imagen_url": row.get("imagen_url"),
+                            "hora_inicio": str(row["hora_inicio"]) if row.get("hora_inicio") else None,
+                            "hora_fin": str(row["hora_fin"]) if row.get("hora_fin") else None,
+                            "categorias": cats,
+                        }
+                    )
+
+                await _attach_imagenes(conn, eventos)
+
+                return {
+                    "data": eventos,
+                    "total": len(eventos),
+                    "fecha": str(today),
+                }
+
+    except Exception as e:
+        logger.error(f"Error getting today's events: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving today's events",
+        )
+
+
+@router.get(
+    "/events/upcoming",
+    response_class=ORJSONResponse,
+    summary="Get upcoming events",
+    description="Retrieve upcoming events (next N days after today)",
+    responses={
+        200: {
+            "description": "Upcoming events retrieved successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "data": [],
+                        "total": 0,
+                        "fecha_desde": "2026-02-07",
+                        "fecha_hasta": "2026-02-13",
+                    }
+                }
+            },
+        },
+        429: {"description": "Too many requests - Rate limit exceeded"},
+        500: {"model": ErrorResponse, "description": "Internal server error"},
+    },
+)
+@limiter.limit("100/minute")
+async def get_upcoming_events(
+    request: Request,
+    days: int = Query(7, ge=1, le=30, description="Number of days ahead (default 7, max 30)"),
+) -> Dict[str, Any]:
+    try:
+        fecha_desde = date.today() + timedelta(days=1)
+        fecha_hasta = date.today() + timedelta(days=days)
+
+        query = """
+        SELECT
+            em.ID_Unico_Evento AS id,
+            em.Titulo_ES AS titulo_es,
+            em.Titulo_CAT AS titulo_cat,
+            LEFT(COALESCE(em.Desc_Larga_ES, ''), 400) AS descripcion_corta_es,
+            em.CP_Evento AS cp,
+            em.Poblacion_Nombre AS poblacion,
+            em.Lugar_Nombre AS lugar,
+            em.Es_Gratuito AS es_gratuito,
+            em.Precio_Euros AS precio,
+            em.Imagen_Principal_URL AS imagen_url,
+            MIN(eh.Fecha_Inicio) AS fecha_inicio,
+            MIN(eh.Hora_Inicio) AS hora_inicio,
+            GROUP_CONCAT(DISTINCT c.Slug ORDER BY c.Slug) AS categorias
+        FROM EVENTOS_MASTER em
+        JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
+        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
+        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
+        WHERE em.Estado = 'ACTIVO'
+          AND em.CP_Evento IN (%s, %s)
+          AND eh.Fecha_Inicio >= %s
+          AND eh.Fecha_Inicio <= %s
+        GROUP BY em.ID_Unico_Evento
+        ORDER BY fecha_inicio ASC, hora_inicio ASC, em.Titulo_ES ASC
+        LIMIT 100
+        """
+
+        async with db_service.get_connection() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
+                await cursor.execute(query, (*POBLACIONES_SOPORTADAS_CP, fecha_desde, fecha_hasta))
+                rows = await cursor.fetchall() or []
+
+                eventos = []
+                for row in rows:
+                    cat_blob = row.get("categorias") or ""
+                    cats = [s for s in cat_blob.split(",") if s] if cat_blob else []
+                    eventos.append(
+                        {
+                            "id": row["id"],
+                            "titulo_es": row["titulo_es"],
+                            "titulo_cat": row["titulo_cat"],
+                            "descripcion_corta_es": row["descripcion_corta_es"],
+                            "cp": row["cp"],
+                            "poblacion": row["poblacion"],
+                            "lugar": row["lugar"],
+                            "es_gratuito": bool(row["es_gratuito"]),
+                            "precio": float(row["precio"]) if row.get("precio") is not None else None,
+                            "imagen_url": row.get("imagen_url"),
+                            "fecha_inicio": str(row["fecha_inicio"]) if row.get("fecha_inicio") else None,
+                            "hora_inicio": str(row["hora_inicio"]) if row.get("hora_inicio") else None,
+                            "categorias": cats,
+                        }
+                    )
+
+                await _attach_imagenes(conn, eventos)
+
+                return {
+                    "data": eventos,
+                    "total": len(eventos),
+                    "fecha_desde": str(fecha_desde),
+                    "fecha_hasta": str(fecha_hasta),
+                }
+
+    except Exception as e:
+        logger.error(f"Error getting upcoming events: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error retrieving upcoming events",
         )
 
 
@@ -244,438 +469,163 @@ async def list_events(
                 "application/json": {
                     "example": {
                         "id": "evt_123",
-                        "titulo_es": "Concierto de Jazz",
-                        "descripcion_larga_es": "Un evento imperdible...",
-                        "poblacion": "Malgrat de Mar",
-                        "lugar": "Auditorio Municipal",
-                        "direccion": "Calle Mayor 123",
-                        "horarios": [
-                            {
-                                "fecha_inicio": "2026-02-07",
-                                "hora_inicio": "20:00:00",
-                                "fecha_fin": "2026-02-07",
-                                "hora_fin": "22:00:00"
-                            }
-                        ],
-                        "categorias": ["musica"],
-                        "es_gratuito": True,
-                        "organizador": "Ayuntamiento"
+                        "titulo_es": "Concierto",
+                        "coordenadas": {"lat": 41.65, "lng": 2.74},
+                        "horarios": [],
+                        "categorias": [],
+                        "imagenes": [],
                     }
                 }
-            }
+            },
         },
         404: {"model": ErrorResponse, "description": "Event not found"},
         429: {"description": "Too many requests - Rate limit exceeded"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
+        500: {"model": ErrorResponse, "description": "Internal server error"},
+    },
 )
 @limiter.limit("100/minute")
 async def get_event_details(
     request: Request,
-    event_id: str = Path(..., description="Event unique ID")
+    event_id: str = Path(..., description="Event unique ID"),
 ) -> Dict[str, Any]:
-    """
-    Get full details for a specific event.
-    
-    **Rate Limit:** 100 requests per minute
-    
-    **Parameters:**
-    - `event_id`: Unique event identifier
-    
-    **Returns:**
-    - Complete event information including:
-      - Basic info (title, description, location)
-      - Schedule details (all dates/times)
-      - Categories
-      - Organizer information
-      - Pricing
-      - Images
-    
-    **Example:**
-    ```
-    GET /api/v1/events/evt_123
-    ```
-    """
     try:
-        # Get event master data
         event_query = """
-        SELECT 
-            em.ID_Unico_Evento,
-            em.Titulo_ES,
-            em.Titulo_CAT,
-            em.Desc_Corta_ES,
-            em.Desc_Corta_CAT,
-            em.Desc_Larga_ES,
-            em.Desc_Larga_CAT,
-            em.CP_Evento,
-            em.Poblacion_Nombre,
-            em.Lugar_Nombre,
-            em.Direccion_Fisica,
-            em.Coordenadas_GPS,
-            em.Tipo_Organizador,
-            em.Organizador_Nombre,
-            em.Organizador_Web,
-            em.Organizador_Email,
-            em.Organizador_Telefono,
-            em.Es_Gratuito,
-            em.Precio_Euros,
-            em.Imagen_Principal_URL,
-            em.Tags_ES,
-            em.Tags_CAT,
-            em.Estado,
-            em.Fecha_Creacion,
-            em.Fecha_Actualizacion
+        SELECT
+            em.ID_Unico_Evento AS id,
+            em.Titulo_ES AS titulo_es,
+            em.Titulo_CAT AS titulo_cat,
+            em.Desc_Larga_ES AS descripcion_larga_es,
+            em.Desc_Larga_CAT AS descripcion_larga_cat,
+            em.CP_Evento AS cp,
+            em.Poblacion_Nombre AS poblacion,
+            em.Lugar_Nombre AS lugar,
+            em.Direccion_Fisica AS direccion,
+            em.Coordenadas_JSON AS coordenadas_json,
+            em.Tipo_Organizador AS tipo_organizador,
+            em.Organizador_Nombre AS organizador,
+            em.Organizador_Web AS organizador_web,
+            em.Es_Gratuito AS es_gratuito,
+            em.Precio_Euros AS precio,
+            em.Imagen_Principal_URL AS imagen_url,
+            em.Tags_ES AS tags_es,
+            em.Tags_CAT AS tags_cat,
+            em.Estado AS estado,
+            em.Fecha_Creacion AS fecha_creacion,
+            em.Link_Entradas_Inscripcion AS link_entradas_inscripcion,
+            em.Requiere_Inscripcion AS requiere_inscripcion
         FROM EVENTOS_MASTER em
         WHERE em.ID_Unico_Evento = %s
         """
-        
-        # Get schedules
+
         schedules_query = """
-        SELECT 
-            Fecha_Inicio,
-            Fecha_Fin,
-            Hora_Inicio,
-            Hora_Fin,
-            Es_Recurrente,
-            Recurrencia_JSON
+        SELECT
+            Fecha_Inicio AS fecha_inicio,
+            Fecha_Fin AS fecha_fin,
+            Hora_Inicio AS hora_inicio,
+            Hora_Fin AS hora_fin,
+            Es_Recurrente AS es_recurrente,
+            Recurrencia_JSON AS recurrencia
         FROM EVENTO_HORARIOS
         WHERE ID_Unico_Evento = %s
         ORDER BY Fecha_Inicio ASC, Hora_Inicio ASC
         """
-        
-        # Get categories
+
         categories_query = """
-        SELECT 
-            c.ID_Categoria,
-            c.Slug,
-            c.Nombre_ES,
-            c.Nombre_CAT
+        SELECT
+            c.ID_Categoria AS id,
+            c.Slug AS slug,
+            c.Nombre_ES AS nombre_es,
+            c.Nombre_CAT AS nombre_cat,
+            c.Color_Hex AS color_hex,
+            c.Icono AS icono
         FROM EVENTO_CATEGORIAS ec
         JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
         WHERE ec.ID_Unico_Evento = %s
         """
-        
+
         async with db_service.get_connection() as conn:
-            async with conn.cursor() as cursor:
-                # Get event
+            async with conn.cursor(aiomysql.DictCursor) as cursor:
                 await cursor.execute(event_query, (event_id,))
                 event_row = await cursor.fetchone()
-                
+
                 if not event_row:
                     raise HTTPException(
                         status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"Event '{event_id}' not found"
+                        detail=f"Event '{event_id}' not found",
                     )
-                
-                # Get schedules
+
                 await cursor.execute(schedules_query, (event_id,))
-                schedule_rows = await cursor.fetchall()
-                
-                # Get categories
+                schedule_rows = await cursor.fetchall() or []
+
                 await cursor.execute(categories_query, (event_id,))
-                category_rows = await cursor.fetchall()
-                
-                # Build response
+                category_rows = await cursor.fetchall() or []
+
+                tags_es = _tags_from_db(event_row.get("tags_es"))
+                tags_cat = _tags_from_db(event_row.get("tags_cat"))
+
                 event = {
-                    "id": event_row[0],
-                    "titulo_es": event_row[1],
-                    "titulo_cat": event_row[2],
-                    "descripcion_corta_es": event_row[3],
-                    "descripcion_corta_cat": event_row[4],
-                    "descripcion_larga_es": event_row[5],
-                    "descripcion_larga_cat": event_row[6],
-                    "cp": event_row[7],
-                    "poblacion": event_row[8],
-                    "lugar": event_row[9],
-                    "direccion": event_row[10],
-                    "coordenadas_gps": event_row[11],
-                    "tipo_organizador": event_row[12],
-                    "organizador": event_row[13],
-                    "organizador_web": event_row[14],
-                    "organizador_email": event_row[15],
-                    "organizador_telefono": event_row[16],
-                    "es_gratuito": bool(event_row[17]),
-                    "precio": float(event_row[18]) if event_row[18] else None,
-                    "imagen_url": event_row[19],
-                    "tags_es": event_row[20],
-                    "tags_cat": event_row[21],
-                    "estado": event_row[22],
-                    "fecha_creacion": str(event_row[23]) if event_row[23] else None,
-                    "fecha_actualizacion": str(event_row[24]) if event_row[24] else None,
+                    "id": event_row["id"],
+                    "titulo_es": event_row["titulo_es"],
+                    "titulo_cat": event_row["titulo_cat"],
+                    "descripcion_larga_es": event_row.get("descripcion_larga_es"),
+                    "descripcion_larga_cat": event_row.get("descripcion_larga_cat"),
+                    "cp": event_row["cp"],
+                    "poblacion": event_row["poblacion"],
+                    "lugar": event_row["lugar"],
+                    "direccion": event_row.get("direccion"),
+                    "coordenadas": _coordenadas_from_db(event_row.get("coordenadas_json")),
+                    "tipo_organizador": event_row.get("tipo_organizador"),
+                    "organizador": event_row.get("organizador"),
+                    "organizador_web": event_row.get("organizador_web"),
+                    "es_gratuito": bool(event_row["es_gratuito"]),
+                    "precio": float(event_row["precio"])
+                    if event_row.get("precio") is not None
+                    else None,
+                    "imagen_url": event_row.get("imagen_url"),
+                    "tags_es": tags_es,
+                    "tags_cat": tags_cat,
+                    "estado": event_row["estado"],
+                    "fecha_creacion": str(event_row["fecha_creacion"])
+                    if event_row.get("fecha_creacion")
+                    else None,
+                    "link_entradas_inscripcion": event_row.get("link_entradas_inscripcion"),
+                    "requiere_inscripcion": bool(event_row["requiere_inscripcion"])
+                    if event_row.get("requiere_inscripcion") is not None
+                    else None,
                     "horarios": [
                         {
-                            "fecha_inicio": str(row[0]) if row[0] else None,
-                            "fecha_fin": str(row[1]) if row[1] else None,
-                            "hora_inicio": str(row[2]) if row[2] else None,
-                            "hora_fin": str(row[3]) if row[3] else None,
-                            "es_recurrente": bool(row[4]),
-                            "recurrencia": row[5]
+                            "fecha_inicio": str(r["fecha_inicio"]) if r.get("fecha_inicio") else None,
+                            "fecha_fin": str(r["fecha_fin"]) if r.get("fecha_fin") else None,
+                            "hora_inicio": str(r["hora_inicio"]) if r.get("hora_inicio") else None,
+                            "hora_fin": str(r["hora_fin"]) if r.get("hora_fin") else None,
+                            "es_recurrente": bool(r["es_recurrente"]),
+                            "recurrencia": r.get("recurrencia"),
                         }
-                        for row in schedule_rows
+                        for r in schedule_rows
                     ],
                     "categorias": [
                         {
-                            "id": row[0],
-                            "slug": row[1],
-                            "nombre_es": row[2],
-                            "nombre_cat": row[3]
+                            "id": r["id"],
+                            "slug": r["slug"],
+                            "nombre_es": r["nombre_es"],
+                            "nombre_cat": r["nombre_cat"],
+                            "color_hex": r.get("color_hex"),
+                            "icono": r.get("icono"),
                         }
-                        for row in category_rows
-                    ]
+                        for r in category_rows
+                    ],
                 }
-                
-                return event
-                
+
+                solo = [event]
+                await _attach_imagenes(conn, solo)
+
+                return solo[0]
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error getting event details: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error retrieving event details"
-        )
-
-
-@router.get(
-    "/events/today",
-    response_class=ORJSONResponse,
-    summary="Get today's events",
-    description="Retrieve events happening today (optimized and cached)",
-    responses={
-        200: {
-            "description": "Today's events retrieved successfully",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "data": [
-                            {
-                                "id": "evt_123",
-                                "titulo_es": "Mercado Local",
-                                "poblacion": "Malgrat de Mar",
-                                "hora_inicio": "09:00:00",
-                                "es_gratuito": True
-                            }
-                        ],
-                        "total": 5,
-                        "fecha": "2026-02-06"
-                    }
-                }
-            }
-        },
-        429: {"description": "Too many requests - Rate limit exceeded"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-@limiter.limit("200/minute")
-async def get_today_events(request: Request) -> Dict[str, Any]:
-    """
-    Get events happening today.
-    
-    **Rate Limit:** 200 requests per minute
-    
-    **Optimizations:**
-    - Cached for 5 minutes
-    - Optimized query for fast response
-    - Only essential fields returned
-    
-    **Returns:**
-    - List of events happening today
-    - Total count
-    - Current date
-    
-    **Example:**
-    ```
-    GET /api/v1/events/today
-    ```
-    """
-    try:
-        today = date.today()
-        
-        query = """
-        SELECT 
-            em.ID_Unico_Evento as id,
-            em.Titulo_ES as titulo_es,
-            em.Titulo_CAT as titulo_cat,
-            em.CP_Evento as cp,
-            em.Poblacion_Nombre as poblacion,
-            em.Lugar_Nombre as lugar,
-            em.Es_Gratuito as es_gratuito,
-            em.Precio_Euros as precio,
-            em.Imagen_Principal_URL as imagen_url,
-            eh.Hora_Inicio as hora_inicio,
-            eh.Hora_Fin as hora_fin,
-            GROUP_CONCAT(DISTINCT c.Slug) as categorias
-        FROM EVENTOS_MASTER em
-        JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
-        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
-        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
-        WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
-          AND eh.Fecha_Inicio = %s
-        GROUP BY em.ID_Unico_Evento, em.Titulo_ES, em.Titulo_CAT, em.CP_Evento, em.Poblacion_Nombre,
-                 em.Lugar_Nombre, em.Es_Gratuito, em.Precio_Euros, em.Imagen_Principal_URL,
-                 eh.Hora_Inicio, eh.Hora_Fin
-        ORDER BY eh.Hora_Inicio ASC, em.Titulo_ES ASC
-        """
-        
-        async with db_service.get_connection() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(query, (*POBLACIONES_SOPORTADAS_CP, today))
-                rows = await cursor.fetchall()
-                
-                eventos = []
-                for row in rows:
-                    eventos.append({
-                        "id": row[0],
-                        "titulo_es": row[1],
-                        "titulo_cat": row[2],
-                        "cp": row[3],
-                        "poblacion": row[4],
-                        "lugar": row[5],
-                        "es_gratuito": bool(row[6]),
-                        "precio": float(row[7]) if row[7] else None,
-                        "imagen_url": row[8],
-                        "hora_inicio": str(row[9]) if row[9] else None,
-                        "hora_fin": str(row[10]) if row[10] else None,
-                        "categorias": row[11].split(',') if row[11] else []
-                    })
-                
-                return {
-                    "data": eventos,
-                    "total": len(eventos),
-                    "fecha": str(today)
-                }
-                
-    except Exception as e:
-        logger.error(f"Error getting today's events: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error retrieving today's events"
-        )
-
-
-@router.get(
-    "/events/upcoming",
-    response_class=ORJSONResponse,
-    summary="Get upcoming events",
-    description="Retrieve upcoming events (next 7 days)",
-    responses={
-        200: {
-            "description": "Upcoming events retrieved successfully",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "data": [
-                            {
-                                "id": "evt_124",
-                                "titulo_es": "Festival de Verano",
-                                "poblacion": "Blanes",
-                                "fecha_inicio": "2026-02-10",
-                                "es_gratuito": False,
-                                "precio": 15.0
-                            }
-                        ],
-                        "total": 12,
-                        "fecha_desde": "2026-02-07",
-                        "fecha_hasta": "2026-02-13"
-                    }
-                }
-            }
-        },
-        429: {"description": "Too many requests - Rate limit exceeded"},
-        500: {"model": ErrorResponse, "description": "Internal server error"}
-    }
-)
-@limiter.limit("100/minute")
-async def get_upcoming_events(
-    request: Request,
-    days: int = Query(7, ge=1, le=30, description="Number of days ahead (default 7, max 30)")
-) -> Dict[str, Any]:
-    """
-    Get upcoming events.
-    
-    **Rate Limit:** 100 requests per minute
-    
-    **Parameters:**
-    - `days`: Number of days to look ahead (default 7, max 30)
-    
-    **Returns:**
-    - List of upcoming events
-    - Total count
-    - Date range
-    
-    **Example:**
-    ```
-    GET /api/v1/events/upcoming?days=7
-    ```
-    """
-    try:
-        fecha_desde = date.today() + timedelta(days=1)  # Tomorrow
-        fecha_hasta = date.today() + timedelta(days=days)
-        
-        query = """
-        SELECT 
-            em.ID_Unico_Evento as id,
-            em.Titulo_ES as titulo_es,
-            em.Titulo_CAT as titulo_cat,
-            em.Desc_Corta_ES as descripcion_corta_es,
-            em.CP_Evento as cp,
-            em.Poblacion_Nombre as poblacion,
-            em.Lugar_Nombre as lugar,
-            em.Es_Gratuito as es_gratuito,
-            em.Precio_Euros as precio,
-            em.Imagen_Principal_URL as imagen_url,
-            MIN(eh.Fecha_Inicio) as fecha_inicio,
-            MIN(eh.Hora_Inicio) as hora_inicio,
-            GROUP_CONCAT(DISTINCT c.Slug) as categorias
-        FROM EVENTOS_MASTER em
-        JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
-        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
-        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
-        WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
-          AND eh.Fecha_Inicio >= %s
-          AND eh.Fecha_Inicio <= %s
-        GROUP BY em.ID_Unico_Evento, em.Titulo_ES, em.Titulo_CAT, em.Desc_Corta_ES,
-                 em.CP_Evento, em.Poblacion_Nombre, em.Lugar_Nombre, em.Es_Gratuito,
-                 em.Precio_Euros, em.Imagen_Principal_URL
-        ORDER BY fecha_inicio ASC, hora_inicio ASC, em.Titulo_ES ASC
-        LIMIT 100
-        """
-        
-        async with db_service.get_connection() as conn:
-            async with conn.cursor() as cursor:
-                await cursor.execute(query, (*POBLACIONES_SOPORTADAS_CP, fecha_desde, fecha_hasta))
-                rows = await cursor.fetchall()
-                
-                eventos = []
-                for row in rows:
-                    eventos.append({
-                        "id": row[0],
-                        "titulo_es": row[1],
-                        "titulo_cat": row[2],
-                        "descripcion_corta_es": row[3],
-                        "cp": row[4],
-                        "poblacion": row[5],
-                        "lugar": row[6],
-                        "es_gratuito": bool(row[7]),
-                        "precio": float(row[8]) if row[8] else None,
-                        "imagen_url": row[9],
-                        "fecha_inicio": str(row[10]) if row[10] else None,
-                        "hora_inicio": str(row[11]) if row[11] else None,
-                        "categorias": row[12].split(',') if row[12] else []
-                    })
-                
-                return {
-                    "data": eventos,
-                    "total": len(eventos),
-                    "fecha_desde": str(fecha_desde),
-                    "fecha_hasta": str(fecha_hasta)
-                }
-                
-    except Exception as e:
-        logger.error(f"Error getting upcoming events: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error retrieving upcoming events"
+            detail="Error retrieving event details",
         )

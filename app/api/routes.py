@@ -5,7 +5,7 @@ Rutas y endpoints de la API.
 import json
 import logging
 from datetime import datetime, date
-from typing import Optional, List
+from typing import Optional, List, Any
 from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import ORJSONResponse
 
@@ -16,6 +16,7 @@ from app.models.schemas import (
     ErrorResponse
 )
 from app.services import events_service, db_service, ai_service
+from app.services.event_binarios import fetch_imagenes_por_eventos, merge_imagenes_en_eventos
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -264,9 +265,73 @@ async def list_events_with_filters(
     ```
     """
     try:
-        # Construir query dinámicamente
-        query = """
-        SELECT 
+        # Construir filtros dinámicos (evento único + horarios agregados)
+        where_clauses = [
+            "em.Estado = 'ACTIVO'",
+            "em.CP_Evento IN (%s, %s)",
+        ]
+        where_params: List[Any] = list(POBLACIONES_SOPORTADAS_CP)
+
+        if poblacion:
+            where_clauses.append("em.Poblacion_Nombre = %s")
+            where_params.append(poblacion)
+
+        if categoria:
+            where_clauses.append(
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM EVENTO_CATEGORIAS ecf
+                    JOIN CATEGORIAS cf ON ecf.ID_Categoria = cf.ID_Categoria
+                    WHERE ecf.ID_Unico_Evento = em.ID_Unico_Evento
+                      AND cf.Slug = %s
+                )
+                """
+            )
+            where_params.append(categoria)
+
+        if tipo_organizador:
+            where_clauses.append("em.Tipo_Organizador = %s")
+            where_params.append(tipo_organizador.upper())
+
+        if tags and tags.strip():
+            tag_search = f"%{tags.strip()}%"
+            where_clauses.append("(em.Tags_ES LIKE %s OR em.Tags_CAT LIKE %s)")
+            where_params.append(tag_search)
+            where_params.append(tag_search)
+
+        horario_filters: List[str] = []
+        horario_params: List[Any] = []
+        if fecha_desde:
+            horario_filters.append("ehf.Fecha_Inicio >= %s")
+            horario_params.append(fecha_desde)
+        if fecha_hasta:
+            horario_filters.append("ehf.Fecha_Inicio <= %s")
+            horario_params.append(fecha_hasta)
+        if es_recurrente is not None:
+            horario_filters.append("ehf.Es_Recurrente = %s")
+            horario_params.append(es_recurrente)
+        if horario_filters:
+            where_clauses.append(
+                f"""
+                EXISTS (
+                    SELECT 1
+                    FROM EVENTO_HORARIOS ehf
+                    WHERE ehf.ID_Unico_Evento = em.ID_Unico_Evento
+                      AND {' AND '.join(horario_filters)}
+                )
+                """
+            )
+            where_params.extend(horario_params)
+
+        if es_gratuito is not None:
+            where_clauses.append("em.Es_Gratuito = %s")
+            where_params.append(es_gratuito)
+
+        where_sql = " AND ".join(where_clauses)
+
+        query = f"""
+        SELECT
             em.ID_Unico_Evento as id,
             em.Titulo_ES as titulo_es,
             em.Titulo_CAT as titulo_cat,
@@ -279,83 +344,64 @@ async def list_events_with_filters(
             em.Tipo_Organizador as tipo_organizador,
             em.Organizador_Nombre as organizador,
             em.Organizador_Web as organizador_web,
+            em.Fuente_URL_Original as fuente_url_original,
             em.Es_Gratuito as es_gratuito,
             em.Precio_Euros as precio,
             em.Imagen_Principal_URL as imagen_url,
             em.Tags_ES as tags_es,
             em.Tags_CAT as tags_cat,
-            eh.Fecha_Inicio as fecha_inicio,
-            eh.Fecha_Fin as fecha_fin,
-            eh.Hora_Inicio as hora_inicio,
-            eh.Hora_Fin as hora_fin,
-            eh.Es_Recurrente as es_recurrente,
-            eh.Recurrencia_JSON as recurrencia,
-            GROUP_CONCAT(DISTINCT c.Slug) as categorias_slugs,
-            GROUP_CONCAT(DISTINCT c.Nombre_ES) as categorias_es,
-            GROUP_CONCAT(DISTINCT c.Nombre_CAT) as categorias_cat
+            (
+                SELECT MIN(eh0.Fecha_Inicio)
+                FROM EVENTO_HORARIOS eh0
+                WHERE eh0.ID_Unico_Evento = em.ID_Unico_Evento
+            ) as fecha_inicio,
+            (
+                SELECT MIN(eh0.Hora_Inicio)
+                FROM EVENTO_HORARIOS eh0
+                WHERE eh0.ID_Unico_Evento = em.ID_Unico_Evento
+            ) as hora_inicio,
+            (
+                SELECT COALESCE(
+                    JSON_ARRAYAGG(
+                        JSON_OBJECT(
+                            'fecha_inicio', eh2.Fecha_Inicio,
+                            'fecha_fin', eh2.Fecha_Fin,
+                            'hora_inicio', eh2.Hora_Inicio,
+                            'hora_fin', eh2.Hora_Fin,
+                            'es_recurrente', eh2.Es_Recurrente,
+                            'recurrencia', eh2.Recurrencia_JSON
+                        )
+                    ),
+                    JSON_ARRAY()
+                )
+                FROM EVENTO_HORARIOS eh2
+                WHERE eh2.ID_Unico_Evento = em.ID_Unico_Evento
+            ) as horarios_json,
+            (
+                SELECT GROUP_CONCAT(DISTINCT c1.Slug ORDER BY c1.Slug)
+                FROM EVENTO_CATEGORIAS ec1
+                JOIN CATEGORIAS c1 ON ec1.ID_Categoria = c1.ID_Categoria
+                WHERE ec1.ID_Unico_Evento = em.ID_Unico_Evento
+            ) as categorias_slugs,
+            (
+                SELECT GROUP_CONCAT(DISTINCT c2.Nombre_ES ORDER BY c2.Slug)
+                FROM EVENTO_CATEGORIAS ec2
+                JOIN CATEGORIAS c2 ON ec2.ID_Categoria = c2.ID_Categoria
+                WHERE ec2.ID_Unico_Evento = em.ID_Unico_Evento
+            ) as categorias_es,
+            (
+                SELECT GROUP_CONCAT(DISTINCT c3.Nombre_CAT ORDER BY c3.Slug)
+                FROM EVENTO_CATEGORIAS ec3
+                JOIN CATEGORIAS c3 ON ec3.ID_Categoria = c3.ID_Categoria
+                WHERE ec3.ID_Unico_Evento = em.ID_Unico_Evento
+            ) as categorias_cat
         FROM EVENTOS_MASTER em
-        LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
-        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
-        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
-        WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
+        WHERE {where_sql}
+        ORDER BY fecha_inicio ASC, hora_inicio ASC, em.Titulo_ES ASC
+        LIMIT {limit} OFFSET {offset}
         """
-        
-        params = list(POBLACIONES_SOPORTADAS_CP)
-        
-        # Filtro por población (refina el CP si se elige una concreta)
-        if poblacion:
-            query += " AND em.Poblacion_Nombre = %s"
-            params.append(poblacion)
-        
-        # Filtro por categoría
-        if categoria:
-            query += " AND c.Slug = %s"
-            params.append(categoria)
-        
-        # Filtro por tipo organizador
-        if tipo_organizador:
-            query += " AND em.Tipo_Organizador = %s"
-            params.append(tipo_organizador.upper())
-        
-        # Filtro por tags (busca en Tags_ES y Tags_CAT, coincidencia parcial)
-        if tags and tags.strip():
-            tag_search = f"%{tags.strip()}%"
-            query += " AND (em.Tags_ES LIKE %s OR em.Tags_CAT LIKE %s)"
-            params.append(tag_search)
-            params.append(tag_search)
-        
-        # Filtro por fecha desde
-        if fecha_desde:
-            query += " AND eh.Fecha_Inicio >= %s"
-            params.append(fecha_desde)
-        
-        # Filtro por fecha hasta
-        if fecha_hasta:
-            query += " AND eh.Fecha_Inicio <= %s"
-            params.append(fecha_hasta)
-        
-        # Filtro por gratuito
-        if es_gratuito is not None:
-            query += " AND em.Es_Gratuito = %s"
-            params.append(es_gratuito)
-        
-        # Filtro por recurrente
-        if es_recurrente is not None:
-            query += " AND eh.Es_Recurrente = %s"
-            params.append(es_recurrente)
-        
-        # Agrupar
-        query += """
-        GROUP BY em.ID_Unico_Evento, eh.ID_Horario
-        ORDER BY eh.Fecha_Inicio ASC, eh.Hora_Inicio ASC
-        """
-        
-        # Paginación
-        query += f" LIMIT {limit} OFFSET {offset}"
-        
-        # Ejecutar query
-        result = await db_service.execute_query(query, tuple(params) if params else None)
+
+        result = await db_service.execute_query(query, tuple(where_params))
         
         # Formatear resultados
         eventos = []
@@ -375,6 +421,29 @@ async def list_events_with_filters(
                 except (ValueError, TypeError):
                     tags_cat = []
             tags_cat = tags_cat or []
+            horarios_raw = row.get("horarios_json") or []
+            if isinstance(horarios_raw, str):
+                try:
+                    horarios_raw = json.loads(horarios_raw)
+                except (ValueError, TypeError):
+                    horarios_raw = []
+            horarios: List[Dict[str, Any]] = []
+            for h in horarios_raw or []:
+                if not isinstance(h, dict):
+                    continue
+                horarios.append(
+                    {
+                        "fecha_inicio": str(h.get("fecha_inicio")) if h.get("fecha_inicio") else None,
+                        "fecha_fin": str(h.get("fecha_fin")) if h.get("fecha_fin") else None,
+                        "hora_inicio": str(h.get("hora_inicio")) if h.get("hora_inicio") else None,
+                        "hora_fin": str(h.get("hora_fin")) if h.get("hora_fin") else None,
+                        "es_recurrente": bool(h.get("es_recurrente")) if h.get("es_recurrente") is not None else False,
+                        "recurrencia": h.get("recurrencia"),
+                    }
+                )
+            # Orden estable en Python (MySQL no garantiza orden en JSON_ARRAYAGG aquí)
+            horarios.sort(key=lambda x: (x.get("fecha_inicio") or "", x.get("hora_inicio") or ""))
+
             evento = {
                 "id": row["id"],
                 "titulo_es": row["titulo_es"],
@@ -388,17 +457,19 @@ async def list_events_with_filters(
                 "tipo_organizador": row["tipo_organizador"],
                 "organizador": row["organizador"],
                 "organizador_web": row.get("organizador_web"),
+                "fuente_url_original": row.get("fuente_url_original"),
                 "es_gratuito": bool(row["es_gratuito"]) if row["es_gratuito"] is not None else False,
                 "precio": float(row["precio"]) if row["precio"] else None,
                 "imagen_url": row["imagen_url"],
                 "tags_es": tags_es,
                 "tags_cat": tags_cat,
                 "fecha_inicio": str(row["fecha_inicio"]) if row["fecha_inicio"] else None,
-                "fecha_fin": str(row["fecha_fin"]) if row["fecha_fin"] else None,
+                "fecha_fin": None,
                 "hora_inicio": str(row["hora_inicio"]) if row["hora_inicio"] else None,
-                "hora_fin": str(row["hora_fin"]) if row["hora_fin"] else None,
-                "es_recurrente": bool(row["es_recurrente"]) if row["es_recurrente"] is not None else False,
-                "recurrencia": row["recurrencia"],
+                "hora_fin": None,
+                "es_recurrente": any(h.get("es_recurrente") for h in horarios),
+                "recurrencia": next((h.get("recurrencia") for h in horarios if h.get("recurrencia")), None),
+                "horarios": horarios,
                 "categorias_slugs": row["categorias_slugs"].split(",") if row["categorias_slugs"] else [],
                 "categorias_es": row["categorias_es"].split(",") if row["categorias_es"] else [],
                 "categorias_cat": row["categorias_cat"].split(",") if row["categorias_cat"] else []
@@ -406,48 +477,24 @@ async def list_events_with_filters(
             eventos.append(evento)
         
         # Contar total (sin paginación)
-        count_query = """
-        SELECT COUNT(DISTINCT em.ID_Unico_Evento) as total
+        count_query = f"""
+        SELECT COUNT(*) as total
         FROM EVENTOS_MASTER em
-        LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
-        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
-        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
-        WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
+        WHERE {where_sql}
         """
-        
-        # Aplicar mismos filtros al count
-        count_params = list(POBLACIONES_SOPORTADAS_CP)
-        if poblacion:
-            count_query += " AND em.Poblacion_Nombre = %s"
-            count_params.append(poblacion)
-        if categoria:
-            count_query += " AND c.Slug = %s"
-            count_params.append(categoria)
-        if tipo_organizador:
-            count_query += " AND em.Tipo_Organizador = %s"
-            count_params.append(tipo_organizador.upper())
-        if tags and tags.strip():
-            tag_search = f"%{tags.strip()}%"
-            count_query += " AND (em.Tags_ES LIKE %s OR em.Tags_CAT LIKE %s)"
-            count_params.append(tag_search)
-            count_params.append(tag_search)
-        if fecha_desde:
-            count_query += " AND eh.Fecha_Inicio >= %s"
-            count_params.append(fecha_desde)
-        if fecha_hasta:
-            count_query += " AND eh.Fecha_Inicio <= %s"
-            count_params.append(fecha_hasta)
-        if es_gratuito is not None:
-            count_query += " AND em.Es_Gratuito = %s"
-            count_params.append(es_gratuito)
-        if es_recurrente is not None:
-            count_query += " AND eh.Es_Recurrente = %s"
-            count_params.append(es_recurrente)
-        
-        count_result = await db_service.execute_query(count_query, tuple(count_params) if count_params else None)
+        count_result = await db_service.execute_query(count_query, tuple(where_params))
         total = count_result[0]["total"] if count_result else 0
-        
+
+        try:
+            async with db_service.get_connection() as conn:
+                ids_ev = [e["id"] for e in eventos if e.get("id")]
+                img_map = await fetch_imagenes_por_eventos(conn, ids_ev) if ids_ev else {}
+                merge_imagenes_en_eventos(eventos, img_map)
+        except Exception as img_err:
+            logger.warning("BINARIOS_STORAGE no disponible o error al cargar imágenes: %s", img_err)
+            for e in eventos:
+                e.setdefault("imagenes", [])
+
         return {
             "eventos": eventos,
             "total": total,

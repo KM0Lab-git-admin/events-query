@@ -60,7 +60,9 @@ const TEXTOS_UI = {
     asociacion: 'Asociación',
     placeholderTags: 'Ej: cultura, #gastronomia, yoga...',
     buscar: 'Buscar en eventos...',
-    error: 'Error'
+    error: 'Error',
+    apiNoResponde:
+      'No hay respuesta de la API (¿arrancada en http://localhost:8000?). Revisa uvicorn y MySQL.'
   },
   ca: {
     tituloSeccion: 'Explorar Esdeveniments',
@@ -108,8 +110,21 @@ const TEXTOS_UI = {
     asociacion: 'Associació',
     placeholderTags: 'Ex: cultura, #gastronomia, ioga...',
     buscar: 'Cercar en esdeveniments...',
-    error: 'Error'
+    error: 'Error',
+    apiNoResponde:
+      'Sense resposta de l\'API (¿arrancada a http://localhost:8000?). Revisa uvicorn i MySQL.'
   }
+}
+
+/** URL principal para miniatura: galería BINARIOS_STORAGE o imagen_url legacy */
+function imagenPrincipal(evento) {
+  const imgs = evento.imagenes
+  if (Array.isArray(imgs) && imgs.length > 0) {
+    const principal = imgs.find((i) => i && i.es_principal)
+    const pick = principal || imgs[0]
+    if (pick?.url) return pick.url
+  }
+  return evento.imagen_url || null
 }
 
 function EventsList() {
@@ -181,15 +196,18 @@ function EventsList() {
   }
 
   const fetchEventos = async () => {
+    const controller = new AbortController()
+    const timeoutMs = 20000
+    const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs)
     try {
       setLoading(true)
       setError(null)
-      
+
       // Construir URL con parámetros
       const params = new URLSearchParams()
       params.append('limit', limit)
       params.append('offset', offset)
-      
+
       if (filtros.poblacion) params.append('poblacion', filtros.poblacion)
       if (filtros.categoria) params.append('categoria', filtros.categoria)
       if (filtros.tipo_organizador) params.append('tipo_organizador', filtros.tipo_organizador)
@@ -198,21 +216,30 @@ function EventsList() {
       if (filtros.es_recurrente !== '') params.append('es_recurrente', filtros.es_recurrente)
       if (filtros.fecha_desde) params.append('fecha_desde', filtros.fecha_desde)
       if (filtros.fecha_hasta) params.append('fecha_hasta', filtros.fecha_hasta)
-      
-      const response = await fetch(`/events/list?${params.toString()}`)
-      
+
+      const response = await fetch(`/events/list?${params.toString()}`, {
+        signal: controller.signal
+      })
+
       if (!response.ok) {
         throw new Error('Error al cargar eventos')
       }
-      
+
       const data = await response.json()
       setEventos(data.eventos || [])
       setTotal(data.total || 0)
       setHasMore(data.has_more || false)
     } catch (err) {
-      setError(err.message)
+      const isAbort =
+        err?.name === 'AbortError' ||
+        (typeof DOMException !== 'undefined' &&
+          err instanceof DOMException &&
+          err.name === 'AbortError')
+      const mensajeApi = TEXTOS_UI[idioma]?.apiNoResponde ?? TEXTOS_UI.es.apiNoResponde
+      setError(isAbort ? mensajeApi : err.message)
       console.error('Error fetching eventos:', err)
     } finally {
+      window.clearTimeout(timeoutId)
       setLoading(false)
     }
   }
@@ -262,6 +289,17 @@ function EventsList() {
   }
 
   const t = TEXTOS_UI[idioma]
+
+  /** Slug → color: API `/events/categorias` (`color`) con fallback estático */
+  const coloresPorSlug = useMemo(() => {
+    const m = { ...CATEGORIA_COLORS }
+    for (const c of categorias) {
+      if (c?.slug && c.color) {
+        m[c.slug] = c.color
+      }
+    }
+    return m
+  }, [categorias])
 
   const getTipoOrganizadorLabel = (tipo) => {
     switch (tipo) {
@@ -585,8 +623,30 @@ function EventsList() {
               {t.noResultados}
             </div>
           ) : (
-            eventosOrdenados.map((evento) => (
+            eventosOrdenados.map((evento) => {
+              const thumbUrl = imagenPrincipal(evento)
+              const horariosEvento = Array.isArray(evento.horarios) && evento.horarios.length
+                ? evento.horarios
+                : [{
+                    fecha_inicio: evento.fecha_inicio || null,
+                    fecha_fin: evento.fecha_fin || null,
+                    hora_inicio: evento.hora_inicio || null,
+                    hora_fin: evento.hora_fin || null,
+                    es_recurrente: Boolean(evento.es_recurrente),
+                    recurrencia: evento.recurrencia || null
+                  }]
+              return (
               <div key={evento.id} className="event-card event-card-full">
+                {thumbUrl ? (
+                  <div className="event-card-media">
+                    <img
+                      src={thumbUrl}
+                      alt=""
+                      className="event-card-thumb"
+                      loading="lazy"
+                    />
+                  </div>
+                ) : null}
                 {/* Header con categorías y tipo organizador */}
                 <div className="event-card-header">
                   <div className="event-categories">
@@ -594,7 +654,7 @@ function EventsList() {
                       <span 
                         key={slug} 
                         className="category-badge"
-                        style={{ backgroundColor: CATEGORIA_COLORS[slug] || '#666' }}
+                        style={{ backgroundColor: coloresPorSlug[slug] || '#666' }}
                       >
                         {(eventoTexto(evento, 'categorias') || [])[idx] || slug}
                       </span>
@@ -661,6 +721,19 @@ function EventsList() {
                         <a href={evento.organizador_web} target="_blank" rel="noopener noreferrer" className="link-external">{evento.organizador_web}</a>
                       </div>
                     )}
+                    {evento.fuente_url_original && (
+                      <div className="detail-item">
+                        <span className="detail-icon">🌐</span>
+                        <a
+                          href={evento.fuente_url_original}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="link-external"
+                        >
+                          {evento.fuente_url_original}
+                        </a>
+                      </div>
+                    )}
                   </div>
                 </div>
                 
@@ -668,45 +741,20 @@ function EventsList() {
                 <div className="event-card-block">
                   <span className="field-label">{t.fechasHorario}</span>
                   <div className="event-card-details">
-                    {evento.es_recurrente ? (
-                      <>
-                        {/* Evento recurrente: rango + patrón de recurrencia */}
-                        <div className="detail-item">
-                          <span className="detail-icon">📅</span>
-                          <span>{t.inicio}: {formatearFecha(evento.fecha_inicio)}</span>
-                        </div>
-                        {evento.fecha_fin && (
-                          <div className="detail-item">
-                            <span className="detail-icon">📅</span>
-                            <span>{t.fin}: {formatearFecha(evento.fecha_fin)}</span>
-                          </div>
-                        )}
-                        <div className="detail-item">
-                          <span className="detail-icon">🔄</span>
-                          <span>{t.recurrente}</span>
-                        </div>
-                        {formatRecurrencia(evento.recurrencia) && (
-                          <div className="detail-item detail-recurrencia">
-                            <span className="detail-icon">📋</span>
-                            <span>{formatRecurrencia(evento.recurrencia)}</span>
-                          </div>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        {/* Evento puntual: fecha + hora exactas */}
-                        <div className="detail-item">
-                          <span className="detail-icon">📅</span>
-                          <span>{t.inicio}: {formatearFecha(evento.fecha_inicio)}{evento.hora_inicio ? ` · ${formatearHora(evento.hora_inicio)}` : ''}</span>
-                        </div>
-                        {(evento.fecha_fin || evento.hora_fin) && (
-                          <div className="detail-item">
-                            <span className="detail-icon">📅</span>
-                            <span>{t.fin}: {evento.fecha_fin ? formatearFecha(evento.fecha_fin) : '—'}{evento.hora_fin ? ` · ${formatearHora(evento.hora_fin)}` : ''}</span>
-                          </div>
-                        )}
-                      </>
-                    )}
+                    {horariosEvento.map((h, idx) => (
+                      <div key={`${evento.id}-h-${idx}`} className="detail-item detail-recurrencia">
+                        <span className="detail-icon">{h.es_recurrente ? '🔄' : '📅'}</span>
+                        <span>
+                          {t.inicio}: {formatearFecha(h.fecha_inicio)}
+                          {h.hora_inicio ? ` · ${formatearHora(h.hora_inicio)}` : ''}
+                          {(h.fecha_fin || h.hora_fin)
+                            ? ` | ${t.fin}: ${h.fecha_fin ? formatearFecha(h.fecha_fin) : '—'}${h.hora_fin ? ` · ${formatearHora(h.hora_fin)}` : ''}`
+                            : ''}
+                          {h.es_recurrente ? ` | ${t.recurrente}` : ''}
+                          {h.recurrencia && formatRecurrencia(h.recurrencia) ? ` | ${formatRecurrencia(h.recurrencia)}` : ''}
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 </div>
                 
@@ -742,7 +790,8 @@ function EventsList() {
                   <code>{evento.id}</code>
                 </div>
               </div>
-            ))
+              )
+            })
           )}
         </div>
       )}

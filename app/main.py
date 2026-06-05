@@ -18,7 +18,6 @@ from app.config import settings
 from app.api.v1.router import router as v1_router
 from app.api.routes import router as legacy_router
 from app.services import db_service
-from app.services.seed_service import seed_if_empty
 
 # Ruta al frontend compilado
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
@@ -62,12 +61,7 @@ async def lifespan(app: FastAPI):
         logger.error(f"✗ Error al inicializar esquema: {e}")
         raise
 
-    # Auto-seed: generar datos fake si la BD está vacía (solo primera vez)
-    try:
-        await seed_if_empty()
-    except Exception as e:
-        logger.warning(f"⚠ Error en auto-seed (no crítico): {e}")
-        # No hacer raise - el seed no es crítico para arrancar
+    # Datos fake: solo con `python scripts/generate_fake_data.py` (no auto-seed al arrancar).
 
     # Verificar configuración de OpenAI
     if settings.openai_api_key:
@@ -137,6 +131,21 @@ app.include_router(v1_router)
 # Include legacy routes (backwards compatibility for PoC frontend)
 app.include_router(legacy_router, tags=["Legacy"])
 
+# Imágenes guardadas por ingesta (persist_phase_c → repo/static/images/<ID_Unico_Evento>/...)
+STATIC_IMAGES_DIR = Path(__file__).resolve().parent.parent / "static" / "images"
+if STATIC_IMAGES_DIR.is_dir():
+    app.mount(
+        "/static/images",
+        StaticFiles(directory=str(STATIC_IMAGES_DIR)),
+        name="event-images",
+    )
+    logger.info("✓ Montado /static/images desde %s", STATIC_IMAGES_DIR)
+else:
+    logger.warning(
+        "⚠ Carpeta %s no existe; URLs /static/images/... devolverán 404 hasta crearla (ingesta).",
+        STATIC_IMAGES_DIR,
+    )
+
 # Middleware para logging de requests
 @app.middleware("http")
 async def log_requests(request, call_next):
@@ -176,6 +185,13 @@ if FRONTEND_DIR.exists():
         Sirve el frontend React para cualquier ruta no manejada por la API.
         Permite que React Router maneje el routing del lado del cliente.
         """
+        # Archivos estáticos de eventos (montaje más arriba); si llegan aquí, no servir SPA
+        if full_path.startswith("static/images/"):
+            return ORJSONResponse(
+                status_code=404,
+                content={"detail": "Image not found"},
+            )
+
         # Si es una ruta de API conocida, dejar que FastAPI devuelva 404
         api_prefixes = ("api", "docs", "redoc", "openapi.json")
         if full_path.startswith(api_prefixes):

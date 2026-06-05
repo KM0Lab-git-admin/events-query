@@ -28,7 +28,12 @@ export default defineConfig({
       '/health': {
         target: 'http://localhost:8000',
         changeOrigin: true,
-      }
+      },
+      // Imágenes locales de ingesta (FastAPI sirve repo/static/images)
+      '/static/images': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     }
   }
 })
