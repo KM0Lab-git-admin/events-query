@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Ops: subida de imágenes de ingesta (scripts/upload_images_railway.py)
+    ingest_upload_secret: Optional[str] = Field(default=None, validation_alias="INGEST_UPLOAD_SECRET")
+
     @property
     def database_url(self) -> str:
         """Construye la URL de conexión a la base de datos."""
