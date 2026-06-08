@@ -9,12 +9,17 @@ recintos canónicos, imágenes descargadas y horarios agrupados.
 QUÉ HACE, EN ORDEN
 ------------------
   0. Limpieza inicial: borra de la BD los eventos cuya última fecha ya pasó
-     (y sus imágenes en disco). La agenda solo contiene hoy y futuro.
+     (y sus imágenes en disco) y, de los eventos vigentes, los horarios sueltos
+     que ya caducaron. La agenda solo contiene hoy y futuro.
   1. Por cada población y cada link: descarga el listado, lo limpia y extrae
      los eventos con un LLM (extractor universal, sin selectores por web).
-  2. Para cada evento con página de detalle válida (descarta links rotos):
+     INGESTA INCREMENTAL: los eventos del listado que YA existen en la BD
+     (mismo título o similar en esa población) se omiten por completo, sin
+     gastar llamadas de detalle/cartel/enriquecimiento. Con --refresh se
+     reprocesan todos.
+  2. Para cada evento NUEVO con página de detalle válida (descarta links rotos):
      descarga el detalle y extrae descripción larga, horas, lugar, imágenes.
-  3. FUSIÓN: agrupa por identidad = hash(poblacion + titulo_norm + lugar_norm).
+  3. FUSIÓN: agrupa por población + similitud de título (>= umbral).
        - Mismo evento en varias fechas  -> 1 evento + N horarios.
        - Mismo evento en varias fuentes  -> 1 evento + N fuentes registradas.
        - Une imágenes de todas las fuentes.
@@ -431,6 +436,54 @@ def purge_past_events(conn, dry_run: bool) -> int:
             cur.execute("DELETE FROM EVENTOS_MASTER WHERE ID_Unico_Evento=%s", (eid,))
     conn.commit()
     return len(ids)
+
+
+def purge_past_horarios(conn, dry_run: bool) -> int:
+    """Borra horarios individuales cuya fecha ya pasó, de eventos que por lo
+    demás siguen vigentes (conservan al menos un horario futuro).
+
+    Es necesario porque con la ingesta incremental los eventos ya existentes NO
+    se reprocesan; sin esta limpieza, sus horarios caducados (p.ej. las primeras
+    sesiones de un ciclo) se quedarían para siempre en EVENTO_HORARIOS.
+    purge_past_events ya borra el evento entero cuando TODOS sus horarios pasaron;
+    esto cubre el caso parcial (unos pasados, otros futuros)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM EVENTO_HORARIOS
+            WHERE COALESCE(Fecha_Fin, Fecha_Inicio) < CURDATE()
+        """)
+        n = cur.fetchone()["n"]
+
+    if not n:
+        log.info("Limpieza inicial: no hay horarios pasados sueltos que borrar")
+        return 0
+
+    log.info(f"Limpieza inicial: {n} horarios pasados sueltos a borrar")
+    if dry_run:
+        return n
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            DELETE FROM EVENTO_HORARIOS
+            WHERE COALESCE(Fecha_Fin, Fecha_Inicio) < CURDATE()
+        """)
+    conn.commit()
+    return n
+
+
+def load_existing_events(conn) -> dict:
+    """Mapa poblacion -> [títulos (Titulo_CAT)] ya presentes en EVENTOS_MASTER.
+
+    Se usa para la ingesta incremental: si un evento del listado ya existe en la
+    BD (mismo título o suficientemente similar en la misma población), se omite
+    por completo y no se gasta ni una llamada de detalle/cartel/enriquecimiento."""
+    out = {}
+    with conn.cursor() as cur:
+        cur.execute("SELECT Poblacion_Nombre, Titulo_CAT FROM EVENTOS_MASTER")
+        for r in cur.fetchall():
+            pob = r["Poblacion_Nombre"] or ""
+            out.setdefault(pob, []).append(r["Titulo_CAT"] or "")
+    return out
 
 
 # ============================================================================
@@ -878,7 +931,10 @@ def enrich(oai, pob, ev: MergedEvent):
 # EXTRACCIÓN DE UNA FUENTE (un link) -> lista de Candidate
 # ============================================================================
 
-def scrape_source(oai, http, pob, cp, listado_url, dry_run) -> list:
+def scrape_source(oai, http, pob, cp, listado_url, dry_run,
+                  existing_titles=None, umbral=SIMILARITY_THRESHOLD,
+                  refresh=False) -> list:
+    existing_titles = existing_titles or []
     log.info(f"  Link: {listado_url}")
     try:
         listing_html = download_html(listado_url, http)
@@ -892,11 +948,22 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run) -> list:
     candidates = []
     detail_cache = {}
     details_done = 0
+    omitidos = 0  # ya existentes en BD: no se reprocesan (ahorro de coste)
 
     for it in items:
         titulo = (it.get("titulo") or "").strip()
         fecha_inicio = (it.get("fecha_inicio") or "").strip()
         if not titulo or not fecha_inicio:
+            continue
+
+        # Ingesta incremental: si el evento ya está en la BD (mismo título o
+        # suficientemente similar en esta población), se omite por completo: no
+        # se baja el detalle, no se lee el cartel, no se enriquece ni se
+        # descargan imágenes. Es el grueso del ahorro de coste por ejecución.
+        if not refresh and any(
+            titulos_similares(titulo, t, umbral) for t in existing_titles
+        ):
+            omitidos += 1
             continue
 
         cand = Candidate(
@@ -974,6 +1041,9 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run) -> list:
 
         candidates.append(cand)
 
+    if omitidos:
+        log.info(f"    Omitidos por ya existir en BD: {omitidos} · "
+                 f"nuevos a procesar: {len(candidates)}")
     return candidates
 
 
@@ -1296,7 +1366,7 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
 # PIPELINE PRINCIPAL
 # ============================================================================
 
-def run(input_path: Path, dry_run: bool, umbral: float):
+def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False):
     if not os.getenv("OPENAI_API_KEY"):
         sys.exit("Falta OPENAI_API_KEY en .env")
     if not input_path.exists():
@@ -1316,8 +1386,19 @@ def run(input_path: Path, dry_run: bool, umbral: float):
         log.info(f"Categorías en BD: {len(cat_map)}")
         log.info(f"Umbral de fusión de títulos: {umbral}")
 
-        # 0. Limpieza inicial
+        # 0. Limpieza inicial: eventos pasados completos + horarios sueltos pasados
         purge_past_events(conn, dry_run)
+        purge_past_horarios(conn, dry_run)
+
+        # Ingesta incremental: eventos ya en BD para omitir su reproceso.
+        # Se carga DESPUÉS de la limpieza para no contar eventos ya borrados.
+        if refresh:
+            existing_by_pob = {}
+            log.info("--refresh activo: se reprocesan TODOS los eventos (sin omitir)")
+        else:
+            existing_by_pob = load_existing_events(conn)
+            total_existentes = sum(len(v) for v in existing_by_pob.values())
+            log.info(f"Eventos ya en BD (se omitirán si reaparecen): {total_existentes}")
 
         # 1-6. Por población
         for pob_cfg in fuentes_config:
@@ -1328,11 +1409,13 @@ def run(input_path: Path, dry_run: bool, umbral: float):
             log.info("=" * 64)
             log.info(f"POBLACIÓN: {pob}  (CP {cp}, {len(links)} links)")
 
-            # Extracción de todas las fuentes
+            # Extracción de todas las fuentes (omitiendo los ya existentes en BD)
+            existing_titles = existing_by_pob.get(pob, [])
             candidates = []
             for link in links:
-                candidates.extend(scrape_source(oai, http, pob, cp, link, dry_run))
-            log.info(f"  Candidatos totales (todas las fuentes): {len(candidates)}")
+                candidates.extend(scrape_source(oai, http, pob, cp, link, dry_run,
+                                                existing_titles, umbral, refresh))
+            log.info(f"  Candidatos nuevos totales (todas las fuentes): {len(candidates)}")
 
             # Fusión
             merged = fusionar(candidates, umbral)
@@ -1374,8 +1457,12 @@ def main():
                     help=(f"Umbral de similitud (0..1) para fusionar eventos de la misma "
                           f"población con títulos parecidos. Default {SIMILARITY_THRESHOLD}. "
                           f"Más alto = más estricto (menos fusiones)."))
+    ap.add_argument("--refresh", action="store_true",
+                    help=("Reprocesa TODOS los eventos, incluidos los que ya existen en "
+                          "la BD. Por defecto (sin este flag) la ingesta es incremental: "
+                          "los eventos ya registrados se omiten para ahorrar coste."))
     args = ap.parse_args()
-    run(Path(args.input), args.dry_run, args.umbral)
+    run(Path(args.input), args.dry_run, args.umbral, args.refresh)
 
 
 if __name__ == "__main__":
