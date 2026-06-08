@@ -158,68 +158,135 @@ log = logging.getLogger("ingest_all")
 
 
 # ============================================================================
-# CONTABILIDAD DE COSTES (por población + global)
+# CONTABILIDAD DE COSTES (gasto REAL, no estimado)
 # ============================================================================
+#
+# El coste se calcula a partir del uso EXACTO de tokens que devuelve la API en
+# cada respuesta (campo `usage`), incluyendo los tokens de entrada CACHEADOS, que
+# OpenAI factura a una tarifa reducida. No es una aproximación: es la misma
+# fórmula que aplica la facturación de OpenAI sobre los tokens consumidos.
+#
+# Precios oficiales en USD por 1.000.000 de tokens. Si en el futuro cambian las
+# tarifas o se usa otro modelo, basta con actualizar esta tabla.
+MODEL_PRICES = {
+    # gpt-4.1-mini
+    "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60},
+}
 
-PRICE_LLM_INPUT_PER_M = 0.40
-PRICE_LLM_OUTPUT_PER_M = 1.60
+
+def _prices_for(model: str) -> dict:
+    if model not in MODEL_PRICES:
+        log.warning(f"Sin tarifa conocida para el modelo '{model}'; el coste "
+                    f"calculado puede no ser exacto.")
+        return {"input": 0.0, "cached_input": 0.0, "output": 0.0}
+    return MODEL_PRICES[model]
 
 
 class CostTracker:
-    """Acumula uso de LLM y descargas, global y por población."""
+    """Acumula el uso REAL de la API (tokens exactos por respuesta) y descargas,
+    desglosado por población y por tipo de operación, además del total global."""
 
     def __init__(self):
         self.by_pob = {}
+        self.by_op = {}
         self.global_stats = self._new_bucket()
 
     def _new_bucket(self):
         return {
-            "llm_calls": 0, "tokens_in": 0, "tokens_out": 0,
+            "llm_calls": 0,
+            "tokens_in": 0,        # tokens de entrada NO cacheados
+            "tokens_cached": 0,    # tokens de entrada cacheados (tarifa reducida)
+            "tokens_out": 0,       # tokens de salida
             "imagenes": 0, "eventos": 0,
         }
 
-    def _bucket(self, pob):
-        if pob not in self.by_pob:
-            self.by_pob[pob] = self._new_bucket()
-        return self.by_pob[pob]
+    def _bucket(self, store, key):
+        if key not in store:
+            store[key] = self._new_bucket()
+        return store[key]
 
-    def add_llm(self, pob, response):
-        if hasattr(response, "usage") and response.usage:
-            for b in (self._bucket(pob), self.global_stats):
-                b["llm_calls"] += 1
-                b["tokens_in"] += response.usage.prompt_tokens
-                b["tokens_out"] += response.usage.completion_tokens
+    def add_llm(self, pob, response, op="otros"):
+        """Suma el uso exacto de una llamada al LLM. Lee prompt_tokens,
+        completion_tokens y, si está, prompt_tokens_details.cached_tokens."""
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+        prompt = getattr(usage, "prompt_tokens", 0) or 0
+        out = getattr(usage, "completion_tokens", 0) or 0
+        cached = 0
+        details = getattr(usage, "prompt_tokens_details", None)
+        if details is not None:
+            cached = getattr(details, "cached_tokens", 0) or 0
+        no_cacheados = max(prompt - cached, 0)
+        for b in (self._bucket(self.by_pob, pob),
+                  self._bucket(self.by_op, op),
+                  self.global_stats):
+            b["llm_calls"] += 1
+            b["tokens_in"] += no_cacheados
+            b["tokens_cached"] += cached
+            b["tokens_out"] += out
 
     def add_imagen(self, pob, n=1):
-        self._bucket(pob)["imagenes"] += n
+        self._bucket(self.by_pob, pob)["imagenes"] += n
         self.global_stats["imagenes"] += n
 
     def add_evento(self, pob, n=1):
-        self._bucket(pob)["eventos"] += n
+        self._bucket(self.by_pob, pob)["eventos"] += n
         self.global_stats["eventos"] += n
 
     @staticmethod
-    def _coste(b):
-        return (b["tokens_in"] / 1_000_000 * PRICE_LLM_INPUT_PER_M +
-                b["tokens_out"] / 1_000_000 * PRICE_LLM_OUTPUT_PER_M)
+    def _coste(b, prices):
+        return (b["tokens_in"] / 1_000_000 * prices["input"] +
+                b["tokens_cached"] / 1_000_000 * prices["cached_input"] +
+                b["tokens_out"] / 1_000_000 * prices["output"])
 
     def report(self):
-        log.info("=" * 64)
-        log.info("INFORME DE COSTES POR POBLACIÓN")
-        log.info("=" * 64)
-        header = f"{'Población':<22}{'Eventos':>8}{'LLM':>6}{'Tok.in':>10}{'Tok.out':>9}{'Imgs':>6}{'Coste $':>10}"
-        log.info(header)
-        log.info("-" * 64)
-        for pob, b in self.by_pob.items():
-            log.info(f"{pob[:22]:<22}{b['eventos']:>8}{b['llm_calls']:>6}"
-                     f"{b['tokens_in']:>10,}{b['tokens_out']:>9,}{b['imagenes']:>6}"
-                     f"{self._coste(b):>10.4f}")
-        log.info("-" * 64)
+        prices = _prices_for(LLM_MODEL)
         g = self.global_stats
-        log.info(f"{'TOTAL':<22}{g['eventos']:>8}{g['llm_calls']:>6}"
-                 f"{g['tokens_in']:>10,}{g['tokens_out']:>9,}{g['imagenes']:>6}"
-                 f"{self._coste(g):>10.4f}")
-        log.info("=" * 64)
+        W = 86
+
+        def fila(nombre, b):
+            log.info(f"{nombre[:24]:<24}{b['llm_calls']:>6}{b['tokens_in']:>12,}"
+                     f"{b['tokens_cached']:>12,}{b['tokens_out']:>12,}"
+                     f"{self._coste(b, prices):>12.4f}")
+
+        log.info("=" * W)
+        log.info(f"INFORME DE GASTO REAL DE OPENAI — modelo {LLM_MODEL}")
+        log.info(f"Tarifas USD/1M tokens: entrada {prices['input']:.2f} · "
+                 f"cacheada {prices['cached_input']:.2f} · salida {prices['output']:.2f}")
+        log.info("=" * W)
+
+        # --- Desglose por tipo de operación ---
+        log.info("POR OPERACIÓN")
+        log.info(f"{'Operación':<24}{'Llam.':>6}{'Tok.in':>12}{'Cacheados':>12}"
+                 f"{'Tok.out':>12}{'Coste $':>12}")
+        log.info("-" * W)
+        for op in sorted(self.by_op):
+            fila(op, self.by_op[op])
+        log.info("-" * W)
+
+        # --- Desglose por población ---
+        log.info("POR POBLACIÓN")
+        log.info(f"{'Población':<24}{'Llam.':>6}{'Tok.in':>12}{'Cacheados':>12}"
+                 f"{'Tok.out':>12}{'Coste $':>12}")
+        log.info("-" * W)
+        for pob in self.by_pob:
+            fila(pob, self.by_pob[pob])
+        log.info("-" * W)
+
+        # --- Totales ---
+        fila("TOTAL", g)
+        log.info("=" * W)
+        log.info(f"Llamadas al LLM : {g['llm_calls']:,}")
+        log.info(f"Tokens entrada  : {g['tokens_in']:,} (no cacheados) + "
+                 f"{g['tokens_cached']:,} (cacheados) = "
+                 f"{g['tokens_in'] + g['tokens_cached']:,}")
+        log.info(f"Tokens salida   : {g['tokens_out']:,}")
+        log.info(f"Imágenes descargadas: {g['imagenes']:,}")
+        log.info(f"Eventos persistidos : {g['eventos']:,}")
+        log.info("-" * W)
+        log.info(f">>> GASTO TOTAL OPENAI: ${self._coste(g, prices):.4f} USD")
+        log.info("=" * W)
 
 
 COST = CostTracker()
@@ -742,7 +809,7 @@ CARTEL_SCHEMA = {
 # LLM: LLAMADAS
 # ============================================================================
 
-def llm_json(oai, pob, system, user, schema):
+def llm_json(oai, pob, system, user, schema, op="otros"):
     resp = oai.chat.completions.create(
         model=LLM_MODEL,
         messages=[{"role": "system", "content": system},
@@ -750,7 +817,7 @@ def llm_json(oai, pob, system, user, schema):
         response_format={"type": "json_schema", "json_schema": schema},
         temperature=0,
     )
-    COST.add_llm(pob, resp)
+    COST.add_llm(pob, resp, op)
     return json.loads(resp.choices[0].message.content)
 
 
@@ -771,7 +838,7 @@ def extract_listing(oai, pob, html_clean, listado_url):
         "(5) Solo eventos futuros o en curso."
     )
     user = f"URL listado: {listado_url}\n\nHTML:\n{html_clean}"
-    data = llm_json(oai, pob, system, user, LISTING_SCHEMA)
+    data = llm_json(oai, pob, system, user, LISTING_SCHEMA, op="listado")
     items = data.get("eventos", [])
     for it in items:
         if it.get("url_detalle"):
@@ -786,7 +853,7 @@ def extract_detail(oai, pob, html_clean, url):
               "campos pedidos. No inventes datos (null si no aparecen). URLs absolutas. "
               "Descripción: solo el texto del evento.")
     user = f"URL: {url}\n\nHTML:\n{html_clean}"
-    data = llm_json(oai, pob, system, user, DETAIL_SCHEMA)
+    data = llm_json(oai, pob, system, user, DETAIL_SCHEMA, op="detalle")
     imgs = [urljoin(url, u) for u in (data.get("imagenes_urls") or []) if u]
     data["imagenes_urls"] = imgs
     if data.get("link_inscripcion"):
@@ -854,7 +921,7 @@ def extract_cartel(oai, pob, http, image_url: str, today_iso: str) -> Optional[d
             response_format={"type": "json_schema", "json_schema": CARTEL_SCHEMA},
             temperature=0,
         )
-        COST.add_llm(pob, resp)
+        COST.add_llm(pob, resp, op="cartel")
         data = json.loads(resp.choices[0].message.content)
         if not data.get("tiene_texto_util"):
             log.info(f"    Cartel-OCR: imagen sin texto útil, descartada")
@@ -904,7 +971,7 @@ def enrich(oai, pob, ev: MergedEvent):
             f"DESCRIPCIÓN (ca):\n{ev.descripcion_larga}\n"
             f"LUGAR (crudo): {ev.lugar}\n"
             f"ORGANIZADOR: {ev.organizador_nombre}")
-    d = llm_json(oai, pob, ENRICH_SYSTEM, user, ENRICHMENT_SCHEMA)
+    d = llm_json(oai, pob, ENRICH_SYSTEM, user, ENRICHMENT_SCHEMA, op="enriquecimiento")
     ev.titulo_es = d["titulo_es"]
     ev.desc_larga_es = d["desc_larga_es"]
     ev.tags_ca = d["tags_ca"]
@@ -1168,7 +1235,8 @@ def geocode_poblacion(oai, pob) -> dict:
         "properties": {"lat": {"type": "number"}, "lng": {"type": "number"}},
         "required": ["lat", "lng"], "additionalProperties": False}}
     d = llm_json(oai, pob, "Devuelve coordenadas geográficas aproximadas.",
-                 f"Centro del municipio de {pob} (Cataluña, España). Lat/Lng.", schema)
+                 f"Centro del municipio de {pob} (Cataluña, España). Lat/Lng.", schema,
+                 op="geocoding")
     return {"lat": round(d["lat"], 6), "lng": round(d["lng"], 6)}
 
 
