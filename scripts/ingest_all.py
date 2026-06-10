@@ -503,6 +503,9 @@ def normalize_place(s: str) -> str:
             s = s[:idx]
             break
     s = strip_accents(s.lower())
+    # quitar puntuación: "platja de l''astillero'" y "platja de l'astillero"
+    # deben comparar iguales (caso real de duplicado por comillas)
+    s = re.sub(r"[^\w\s]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
@@ -727,28 +730,60 @@ def purge_past_horarios(conn, dry_run: bool) -> int:
 
 
 def load_existing_events(conn) -> dict:
-    """Mapa poblacion -> [{id, titulo}] ya presentes en EVENTOS_MASTER.
+    """Mapa poblacion -> [{id, titulo, lugar, fmin, fmax}] ya en EVENTOS_MASTER.
 
     Se usa para la ingesta incremental: si un evento del listado ya existe en la
-    BD (mismo título o suficientemente similar en la misma población), se omite
-    por completo y no se gasta ni una llamada de detalle/cartel/enriquecimiento.
-    El id permite registrar la confirmación multi-fuente en EVENTO_FUENTES."""
+    BD (título similar, o mismo lugar con fechas solapadas, en la misma
+    población), se omite por completo y no se gasta ni una llamada de
+    detalle/cartel/enriquecimiento. El id permite registrar la confirmación
+    multi-fuente en EVENTO_FUENTES."""
     out = {}
     with conn.cursor() as cur:
-        cur.execute("SELECT ID_Unico_Evento, Poblacion_Nombre, Titulo_CAT FROM EVENTOS_MASTER")
+        cur.execute("""
+            SELECT em.ID_Unico_Evento, em.Poblacion_Nombre, em.Titulo_CAT,
+                   em.Lugar_Nombre,
+                   MIN(h.Fecha_Inicio) AS fmin,
+                   MAX(COALESCE(h.Fecha_Fin, h.Fecha_Inicio)) AS fmax
+            FROM EVENTOS_MASTER em
+            LEFT JOIN EVENTO_HORARIOS h ON h.ID_Unico_Evento = em.ID_Unico_Evento
+            GROUP BY em.ID_Unico_Evento, em.Poblacion_Nombre, em.Titulo_CAT,
+                     em.Lugar_Nombre
+        """)
         for r in cur.fetchall():
             pob = r["Poblacion_Nombre"] or ""
-            out.setdefault(pob, []).append(
-                {"id": r["ID_Unico_Evento"], "titulo": r["Titulo_CAT"] or ""})
+            out.setdefault(pob, []).append({
+                "id": r["ID_Unico_Evento"],
+                "titulo": r["Titulo_CAT"] or "",
+                "lugar": r["Lugar_Nombre"] or "",
+                "fmin": r["fmin"], "fmax": r["fmax"],
+            })
     return out
 
 
-def buscar_evento_existente(titulo: str, existentes: list, umbral: float):
-    """Devuelve el {id, titulo} del evento ya en BD cuyo título casa con el
-    candidato, o None si es nuevo."""
+def buscar_evento_existente(titulo: str, existentes: list, umbral: float,
+                            lugar: str = "", fecha: str = ""):
+    """Devuelve el {id, ...} del evento ya en BD que casa con el candidato, o
+    None si es nuevo. Dos criterios (los mismos que la fusión intra-run):
+      1. Título similar (>= umbral).
+      2. Mismo lugar normalizado + fecha dentro del rango del evento (±1 día).
+         Cubre el mismo evento titulado distinto en otra fuente/otro run
+         (caso real: 'Campionat de volei' vs 'La Platja de l'Astillero acull
+         el circuit de vòlei platja')."""
+    lugar_norm = normalize_place(lugar) if lugar else ""
+    fecha_d = None
+    if fecha:
+        try:
+            fecha_d = date.fromisoformat(str(fecha)[:10])
+        except (ValueError, TypeError):
+            pass
     for e in existentes:
         if titulos_similares(titulo, e["titulo"], umbral):
             return e
+        if lugar_norm and fecha_d and e.get("lugar") and e.get("fmin"):
+            if normalize_place(e["lugar"]) == lugar_norm:
+                fmin, fmax = e["fmin"], e["fmax"] or e["fmin"]
+                if (fmin - timedelta(days=1)) <= fecha_d <= (fmax + timedelta(days=1)):
+                    return e
     return None
 
 
@@ -1556,7 +1591,9 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
         # se baja el detalle, no se lee el cartel, no se enriquece ni se
         # descargan imágenes. Es el grueso del ahorro de coste por ejecución.
         if not refresh:
-            existente = buscar_evento_existente(titulo, existing_events, umbral)
+            existente = buscar_evento_existente(titulo, existing_events, umbral,
+                                                it.get("lugar_corto") or "",
+                                                fecha_inicio)
             if existente:
                 omitidos += 1
                 if confirmaciones is not None:
@@ -2471,7 +2508,8 @@ def procesar_target_telegram(oai, http, target_row: dict, existing_events: list,
         if tipo == "EVENTO":
             if not c.get("fecha"):
                 continue  # evento sin fecha no es persistible
-            existente = buscar_evento_existente(titulo, existing_events, umbral)
+            existente = buscar_evento_existente(titulo, existing_events, umbral,
+                                                c.get("lugar") or "", c["fecha"])
             if existente and not refresh:
                 confirmaciones.append((existente["id"], url_msg))
                 continue
@@ -2671,7 +2709,9 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
         if not titulo or not (fecha or detail.get("horarios_discretos")):
             log.info(f"    Detalle sin evento identificable (¿caducado?): {url}")
             return [], [], meta, 0
-        existente = None if refresh else buscar_evento_existente(titulo, existing_events, umbral)
+        existente = None if refresh else buscar_evento_existente(
+            titulo, existing_events, umbral,
+            detail.get("lugar_nombre") or "", fecha)
         if existente:
             confirmaciones.append((existente["id"], url))
             log.info(f"    Ya en BD, confirmada fuente: {titulo[:60]}")
@@ -2706,7 +2746,9 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
         if not titulo or tipo == "DESCARTAR":
             continue
         if tipo == "EVENTO":
-            existente = None if refresh else buscar_evento_existente(titulo, existing_events, umbral)
+            existente = None if refresh else buscar_evento_existente(
+                titulo, existing_events, umbral,
+                it.get("lugar_corto") or "", it.get("fecha") or "")
             if existente:
                 confirmaciones.append((existente["id"], it.get("url_detalle") or url))
                 continue

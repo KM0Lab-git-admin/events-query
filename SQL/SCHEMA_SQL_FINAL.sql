@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS `EVENTOS_MASTER` (
   `Lugar_Nombre` VARCHAR(255) NOT NULL,
   `Direccion_Fisica` VARCHAR(255) NULL,
   `Coordenadas_JSON` JSON NULL COMMENT '{"lat": float, "lng": float}',
+  `ID_Familia` CHAR(64) NULL COMMENT 'ID del evento cabeza de familia (agrupación, no fusión)',
   `Tipo_Organizador` ENUM('PUBLICO','PRIVADO','ASOCIACION') NULL,
   `Organizador_Nombre` VARCHAR(255) NULL,
   `Organizador_Web` VARCHAR(2048) NULL,

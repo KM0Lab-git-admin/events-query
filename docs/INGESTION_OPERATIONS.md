@@ -509,6 +509,30 @@ Instagram/Facebook/X/YouTube están registradas en `BIBLIOTECA_FUENTES` con
 Apify se implementará en fase 2; al activarlo bastará poner `Activa=1` y crear
 su target. Telegram público (t.me/s/handle) SÍ está implementado en fase 1.
 
+### Deduplicación semántica (scripts/dedupe_events.py)
+
+La ingesta deduplica por título/lugar/fechas, pero fuentes distintas titulan el
+mismo evento de formas muy diferentes, y los festivales generan actividades
+relacionadas que no son duplicados. `dedupe_events.py` lo resuelve sobre la BD:
+
+```bash
+mysql -u USER -p events_db < SQL/familia_delta.sql      # una vez (ID_Familia)
+python scripts/dedupe_events.py --target local --dry-run  # informe sin tocar BD
+python scripts/dedupe_events.py --target local            # aplica
+```
+
+- Blocking: pares de la misma ciudad con fechas solapadas (±2 días).
+- Embeddings (`text-embedding-3-small`) + boosts (lugar/organizador/fecha).
+- `score >= 0.90` → fusión automática (gana el de descripción más rica; se
+  traspasan horarios, fuentes, categorías e imágenes; el otro se borra).
+- `0.78 <= score < 0.90` → juez LLM: `MISMO` (fusión) / `MISMA_FAMILIA`
+  (agrupa vía `EVENTOS_MASTER.ID_Familia`, cabeza = el que engloba en fechas) /
+  `DISTINTO`.
+- Umbrales ajustables: `--umbral-dup`, `--umbral-gris` (o env `DEDUPE_UMBRAL_*`).
+- Idempotente; pensado para el cron justo después de `ingest_all.py`.
+- Railway: tras fusiones, ejecutar `ingest_all.py --sync-images-only --target
+  railway` para resubir las imágenes traspasadas a su nueva ruta.
+
 ---
 
 ## Backup y recuperación
