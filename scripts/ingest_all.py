@@ -1,50 +1,60 @@
 """
-ingest_all.py — Pipeline completo de ingesta de eventos municipales (un solo proceso).
+ingest_all.py — Pipeline completo de ingesta de eventos y noticias municipales
+(un solo proceso).
 
-Toma un JSON de poblaciones (cada una con sus códigos postales y N links de
-agenda) y, en UNA sola ejecución, deja la base de datos poblada con eventos
-listos para consumir por la API: traducidos, etiquetados, categorizados, con
-recintos canónicos, imágenes descargadas y horarios agrupados.
+MODO PRINCIPAL (sin --input, pensado para el cron diario): lee las fuentes de
+la BD (BIBLIOTECA_FUENTES + SCRAPING_TARGETS, cargadas con
+scripts/import_fuentes.py) y en UNA sola ejecución deja la base de datos al
+día: eventos nuevos extraídos/fusionados/enriquecidos, noticias clasificadas y
+traducidas, contenido caducado limpiado, e imágenes sincronizadas.
 
-QUÉ HACE, EN ORDEN
-------------------
-  0. Limpieza inicial: borra de la BD los eventos cuya última fecha ya pasó
-     (y sus imágenes: disco local o servidor remoto según --target) y, de los
-     eventos vigentes, los horarios sueltos que ya caducaron.
-  1. Por cada población y cada link: descarga el listado, lo limpia y extrae
-     los eventos con un LLM (extractor universal, sin selectores por web).
-     INGESTA INCREMENTAL: los eventos del listado que YA existen en la BD
-     (mismo título o similar en esa población) se omiten por completo, sin
-     gastar llamadas de detalle/cartel/enriquecimiento. Con --refresh se
-     reprocesan todos.
-  2. Para cada evento NUEVO con página de detalle válida (descarta links rotos):
-     descarga el detalle y extrae descripción larga, horas, lugar, imágenes.
-  3. FUSIÓN: agrupa por población + similitud de título (>= umbral).
-       - Mismo evento en varias fechas  -> 1 evento + N horarios.
-       - Mismo evento en varias fuentes  -> 1 evento + N fuentes registradas.
-       - Une imágenes de todas las fuentes.
-  4. Filtro temporal: descarta horarios pasados; si un evento se queda sin
-     horarios futuros, se descarta entero.
-  5. ENRIQUECIMIENTO (1 llamada LLM por evento ya fusionado): traducción ES,
-     tags genéricos bilingües, categorías del catálogo cerrado, y deducción
-     del recinto canónico + su tipo.
-  6. PERSISTENCIA transaccional: CIUDADES, CODIGOS_POSTALES, RECINTOS,
-     BIBLIOTECA_FUENTES, EVENTOS_MASTER, EVENTO_HORARIOS, EVENTO_CATEGORIAS,
-     EVENTO_FUENTES, BINARIOS_STORAGE. Idempotente por ID_Unico_Evento.
-  7. Informe de costes desglosado por población.
+MODO LEGACY (--input fuentes.json): flujo original solo-eventos desde JSON plano.
 
-NO hace: embeddings (se generan aparte cuando se active la búsqueda semántica).
+QUÉ HACE, EN ORDEN (modo BD)
+----------------------------
+  0. Limpieza inicial: borra eventos cuya última fecha ya pasó (con sus
+     imágenes locales o remotas según --target), horarios sueltos caducados,
+     y archiva/borra noticias caducadas (TTL = NEWS_TTL_DIAS desde publicación).
+  1. Carga targets activos de la BD, agrupados por población y prioridad.
+  2. Por cada target, DETECCIÓN DE CAMBIOS por URL: GET condicional
+     (ETag/Last-Modified -> 304) + fingerprint sha256 del HTML limpio. Si la
+     URL no cambió desde el último run -> skip total (coste 0 LLM). Telegram
+     usa el id del último mensaje como fingerprint.
+  3. Según el tipo de fuente:
+       - EVENTOS  -> extractor de listado clásico (sin clasificador).
+       - MIXTO/NOTICIAS -> clasificador LLM por item: EVENTO | NOTICIA | DESCARTAR.
+       - WEB_DETALLE -> extracción directa de la página del evento (agregadores);
+         se auto-pausa tras 3 capturas vacías (página caducada).
+       - Telegram (t.me/s/handle) -> mensajes recientes clasificados en lote.
+     INGESTA INCREMENTAL: lo que ya existe en BD (título similar en la misma
+     población) se omite sin gastar detalle/cartel/enriquecimiento; la fuente
+     queda registrada igualmente en EVENTO_FUENTES (Aporto_Extraccion=0).
+  4. EVENTOS nuevos: detalle + cartel-OCR condicional -> FUSIÓN (título similar,
+     o fechas solapadas + mismo lugar) -> filtro temporal -> enriquecimiento
+     (traducción, tags, categorías, recinto) -> persistencia transaccional.
+  5. NOTICIAS nuevas: detalle -> dedupe cross-fuente (título similar ±7 días)
+     -> traducción CA/ES + tags -> NOTICIAS_MASTER + NOTICIA_BINARIOS
+     (Fecha_Caducidad = publicación + NEWS_TTL_DIAS).
+  6. Limpieza de carpetas de imágenes huérfanas + sync de binarios remotos.
+  7. Estado por target en SCRAPING_TARGETS (OK/ERROR/PAUSADO, ETag,
+     fingerprint, contadores) + resumen de targets + informe de gasto LLM.
+
+Un lock-file (scripts/.ingest.lock) evita ejecuciones simultáneas del cron.
+Redes sociales IG/FB/X/YouTube: registradas en BD inactivas; conector Apify en
+fase 2. NO hace: embeddings (se generan aparte).
 
 USO
 ---
-    python ingest_all.py --input fuentes.json
-    python ingest_all.py --input fuentes.json --target local      # Docker/local (default)
-    python ingest_all.py --input fuentes.json --target railway    # MySQL Railway + imágenes subidas al servidor (sin script aparte)
-    python ingest_all.py --sync-images-only --target railway      # solo repara imágenes rotas en Railway
-    python ingest_all.py --input fuentes.json --dry-run           # no toca BD ni descarga imágenes
+    python ingest_all.py                            # fuentes desde BD (modo cron)
+    python ingest_all.py --target railway           # ídem contra Railway
+    python ingest_all.py --solo-poblacion "Malgrat de Mar"
+    python ingest_all.py --dry-run                  # no escribe BD/imágenes (SÍ gasta LLM)
+    python ingest_all.py --refresh                  # ignora incremental y fingerprints
+    python ingest_all.py --input fuentes.json       # modo legacy JSON plano
+    python ingest_all.py --sync-images-only --target railway
 
-FORMATO DEL JSON DE ENTRADA
----------------------------
+FORMATO DEL JSON DE ENTRADA (legacy)
+------------------------------------
     [
       {"poblacion": "Malgrat de Mar", "codigos_postales": ["08380"],
        "links": ["https://www.ajmalgrat.cat/comunicacio/agenda"]},
@@ -80,7 +90,7 @@ import sys
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urljoin, urlparse
@@ -116,6 +126,24 @@ HTTP_TIMEOUT = 30
 HTTP_USER_AGENT = "KM0EventsIngestion/0.2"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DETAIL_PAGES_PER_SOURCE = 60  # tope de seguridad de coste por link
+
+# Noticias: días de vigencia desde su publicación. Tras caducar se archivan
+# (Estado=ARCHIVADA, sin binarios) y a los 90 días se borran definitivamente.
+NEWS_TTL_DIAS = int(os.getenv("NEWS_TTL_DIAS", "45"))
+NEWS_ARCHIVO_DIAS = 90  # días extra en ARCHIVADA antes del DELETE definitivo
+
+# Telegram público (t.me/s/handle): paginación y ventana temporal.
+TELEGRAM_MAX_PAGINAS = 3
+TELEGRAM_MAX_DIAS = 14  # no interesa histórico más antiguo
+
+# Lock para el cron: si el fichero existe y es más joven que esto, hay otra
+# ejecución en marcha y se aborta. Más viejo = lock huérfano, se ignora.
+LOCK_FILE = Path(__file__).resolve().parent / ".ingest.lock"
+LOCK_MAX_AGE_HORAS = 6
+
+# Targets WEB_DETALLE (página de un solo evento, suele caducar): tras N
+# capturas vacías/rotas consecutivas se pausan automáticamente.
+TARGET_MAX_VACIAS = 3
 OPENAI_TIMEOUT = float(os.getenv("INGEST_OPENAI_TIMEOUT") or os.getenv("OPENAI_TIMEOUT", "120"))
 OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "3"))
 
@@ -579,6 +607,30 @@ class MergedEvent:
     recinto_tipo: str = "OTRO"
 
 
+@dataclass
+class Noticia:
+    """Una noticia tal como sale de una fuente, antes de enriquecer/persistir."""
+    poblacion: str
+    titulo: str
+    fecha_publicacion: str          # YYYY-MM-DD
+    fuente_url: str
+    cuerpo: str = ""
+    idioma: str = "ca"
+    imagen_url: str = ""            # URL externa de la imagen, si hay
+    id_fuente: Optional[int] = None  # FK BIBLIOTECA_FUENTES si se conoce
+    # rellenado en enriquecimiento:
+    titulo_es: str = ""
+    cuerpo_es: str = ""
+    tags_ca: list = field(default_factory=list)
+    tags_es: list = field(default_factory=list)
+
+
+def noticia_id(poblacion: str, titulo: str) -> str:
+    """ID determinista de noticia: mismo patrón que event_id_from_title."""
+    basis = f"noticia|{strip_accents(poblacion.lower()).strip()}|{normalize_title(titulo)}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
 # ============================================================================
 # CONEXIÓN BD
 # ============================================================================
@@ -675,18 +727,127 @@ def purge_past_horarios(conn, dry_run: bool) -> int:
 
 
 def load_existing_events(conn) -> dict:
-    """Mapa poblacion -> [títulos (Titulo_CAT)] ya presentes en EVENTOS_MASTER.
+    """Mapa poblacion -> [{id, titulo}] ya presentes en EVENTOS_MASTER.
 
     Se usa para la ingesta incremental: si un evento del listado ya existe en la
     BD (mismo título o suficientemente similar en la misma población), se omite
-    por completo y no se gasta ni una llamada de detalle/cartel/enriquecimiento."""
+    por completo y no se gasta ni una llamada de detalle/cartel/enriquecimiento.
+    El id permite registrar la confirmación multi-fuente en EVENTO_FUENTES."""
     out = {}
     with conn.cursor() as cur:
-        cur.execute("SELECT Poblacion_Nombre, Titulo_CAT FROM EVENTOS_MASTER")
+        cur.execute("SELECT ID_Unico_Evento, Poblacion_Nombre, Titulo_CAT FROM EVENTOS_MASTER")
         for r in cur.fetchall():
             pob = r["Poblacion_Nombre"] or ""
-            out.setdefault(pob, []).append(r["Titulo_CAT"] or "")
+            out.setdefault(pob, []).append(
+                {"id": r["ID_Unico_Evento"], "titulo": r["Titulo_CAT"] or ""})
     return out
+
+
+def buscar_evento_existente(titulo: str, existentes: list, umbral: float):
+    """Devuelve el {id, titulo} del evento ya en BD cuyo título casa con el
+    candidato, o None si es nuevo."""
+    for e in existentes:
+        if titulos_similares(titulo, e["titulo"], umbral):
+            return e
+    return None
+
+
+def load_existing_noticias(conn) -> dict:
+    """Mapa poblacion -> [{id, titulo, fecha}] de noticias ACTIVAS en BD.
+    Omisión incremental + dedupe cross-fuente (ayuntamiento vs radio local)."""
+    out = {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT n.ID_Unico_Noticia, c.Nombre AS Poblacion, n.Titulo_CAT,
+                   n.Fecha_Publicacion
+            FROM NOTICIAS_MASTER n JOIN CIUDADES c ON c.ID_Ciudad = n.ID_Ciudad
+            WHERE n.Estado = 'ACTIVA'
+        """)
+        for r in cur.fetchall():
+            out.setdefault(r["Poblacion"] or "", []).append({
+                "id": r["ID_Unico_Noticia"],
+                "titulo": r["Titulo_CAT"] or "",
+                "fecha": r["Fecha_Publicacion"],
+            })
+    return out
+
+
+def purge_noticias_caducadas(conn, http: httpx.Client, target: IngestTarget,
+                             dry_run: bool) -> int:
+    """Ciclo de vida de noticias: las ACTIVAS con Fecha_Caducidad < hoy pasan a
+    ARCHIVADA y pierden sus binarios (disco/remoto + NOTICIA_BINARIOS); las
+    ARCHIVADAS desde hace más de NEWS_ARCHIVO_DIAS se borran definitivamente."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT ID_Unico_Noticia FROM NOTICIAS_MASTER
+            WHERE Estado='ACTIVA' AND Fecha_Caducidad IS NOT NULL
+              AND Fecha_Caducidad < CURDATE()
+        """)
+        a_archivar = [r["ID_Unico_Noticia"] for r in cur.fetchall()]
+
+    if a_archivar:
+        log.info(f"Limpieza inicial: {len(a_archivar)} noticias caducadas a archivar")
+        if not dry_run:
+            for nid in a_archivar:
+                if target.store_images_locally:
+                    ndir = IMAGES_DIR / nid
+                    if ndir.exists():
+                        shutil.rmtree(ndir, ignore_errors=True)
+                else:
+                    try:
+                        _delete_event_images_remote(http, target, nid)
+                    except httpx.HTTPError as exc:
+                        log.warning(f"  No se pudieron borrar imágenes remotas de noticia {nid}: {exc}")
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM NOTICIA_BINARIOS WHERE ID_Unico_Noticia=%s", (nid,))
+                    cur.execute("""UPDATE NOTICIAS_MASTER
+                        SET Estado='ARCHIVADA', Imagen_Principal_URL=NULL
+                        WHERE ID_Unico_Noticia=%s""", (nid,))
+            conn.commit()
+    else:
+        log.info("Limpieza inicial: no hay noticias caducadas que archivar")
+
+    # Borrado definitivo de archivadas antiguas (sin binarios ya).
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT COUNT(*) AS n FROM NOTICIAS_MASTER
+            WHERE Estado='ARCHIVADA'
+              AND Fecha_Caducidad < DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        """, (NEWS_ARCHIVO_DIAS,))
+        n_borrar = cur.fetchone()["n"]
+    if n_borrar and not dry_run:
+        with conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM NOTICIAS_MASTER
+                WHERE Estado='ARCHIVADA'
+                  AND Fecha_Caducidad < DATE_SUB(CURDATE(), INTERVAL %s DAY)
+            """, (NEWS_ARCHIVO_DIAS,))
+        conn.commit()
+        log.info(f"Limpieza inicial: {n_borrar} noticias archivadas antiguas borradas")
+    return len(a_archivar)
+
+
+def purge_binarios_huerfanos(conn, target: IngestTarget, dry_run: bool) -> int:
+    """Borra del disco local las carpetas de imágenes cuyo id no corresponde a
+    ningún evento ni noticia vivos. En Railway no hay listado remoto: allí el
+    borrado va siempre guiado por BD (purge_past_events / purge_noticias)."""
+    if not target.store_images_locally or not IMAGES_DIR.exists():
+        return 0
+    with conn.cursor() as cur:
+        cur.execute("SELECT ID_Unico_Evento AS id FROM EVENTOS_MASTER")
+        vivos = {r["id"] for r in cur.fetchall()}
+        cur.execute("SELECT ID_Unico_Noticia AS id FROM NOTICIAS_MASTER WHERE Estado='ACTIVA'")
+        vivos |= {r["id"] for r in cur.fetchall()}
+    borrados = 0
+    for d in IMAGES_DIR.iterdir():
+        if d.is_dir() and re.fullmatch(r"[a-f0-9]{64}", d.name) and d.name not in vivos:
+            log.info(f"  Carpeta huérfana: {d.name[:16]}…")
+            if not dry_run:
+                shutil.rmtree(d, ignore_errors=True)
+            borrados += 1
+    if borrados:
+        log.info(f"Limpieza: {borrados} carpetas de imágenes huérfanas borradas")
+    return borrados
 
 
 # ============================================================================
@@ -778,6 +939,8 @@ DETAIL_SCHEMA = {
     "schema": {
         "type": "object",
         "properties": {
+            "titulo": {"type": ["string", "null"], "description": "Título del evento tal como aparece en la página. null si no se distingue."},
+            "fecha_inicio": {"type": ["string", "null"], "description": "YYYY-MM-DD de inicio del evento si aparece en la página. null si no."},
             "descripcion_larga": {"type": ["string", "null"], "description": "Solo texto descriptivo del evento, sin menús ni breadcrumbs."},
             "fecha_fin": {"type": ["string", "null"], "description": "YYYY-MM-DD solo si el evento es un rango CONTINUO de varios días (ej: 'del 2 al 30 de mayo'). null si es un solo día o si las fechas son discretas."},
             "hora_inicio": {"type": ["string", "null"]},
@@ -812,7 +975,8 @@ DETAIL_SCHEMA = {
                 },
             },
         },
-        "required": ["descripcion_larga", "fecha_fin", "hora_inicio", "hora_fin",
+        "required": ["titulo", "fecha_inicio", "descripcion_larga", "fecha_fin",
+                     "hora_inicio", "hora_fin",
                      "lugar_nombre", "direccion_fisica", "organizador_nombre",
                      "es_gratuito", "precio_euros", "link_inscripcion",
                      "imagenes_urls", "horarios_discretos"],
@@ -943,6 +1107,118 @@ CARTEL_SCHEMA = {
                      "organizador_nombre", "es_gratuito", "precio_euros",
                      "info_adicional"],
         "additionalProperties": False,
+    },
+}
+
+
+# Clasificación de listados MIXTOS/NOTICIAS: separa eventos de noticias en una
+# sola llamada. Las fuentes con Tipo_Contenido=EVENTOS no pasan por aquí
+# (van directas a LISTING_SCHEMA, sin coste extra).
+CLASIFICACION_SCHEMA = {
+    "name": "items_clasificados", "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "tipo": {
+                            "type": "string", "enum": ["EVENTO", "NOTICIA", "DESCARTAR"],
+                            "description": ("EVENTO: actividad con fecha/hora futura a la que se puede "
+                                            "asistir (concierto, taller, fiesta, exposición...). "
+                                            "NOTICIA: información/comunicado sin asistencia (obras, "
+                                            "subvenciones, resultados, avisos de servicio). "
+                                            "DESCARTAR: menús, banners, contenido sin valor."),
+                        },
+                        "titulo": {"type": "string", "description": "Título limpio del item."},
+                        "url_detalle": {"type": ["string", "null"], "description": "URL ABSOLUTA y REAL a la página del item. null si no hay. NUNCA inventes."},
+                        "fecha": {"type": ["string", "null"], "description": "YYYY-MM-DD. Para EVENTO: fecha de celebración. Para NOTICIA: fecha de publicación. null si no aparece."},
+                        "hora_inicio": {"type": ["string", "null"], "description": "HH:MM solo para EVENTO si aparece."},
+                        "lugar_corto": {"type": ["string", "null"], "description": "Lugar solo para EVENTO si aparece."},
+                        "imagen_url": {"type": ["string", "null"], "description": "URL absoluta de imagen si aparece."},
+                    },
+                    "required": ["tipo", "titulo", "url_detalle", "fecha",
+                                 "hora_inicio", "lugar_corto", "imagen_url"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["items"], "additionalProperties": False,
+    },
+}
+
+# Detalle de una noticia: cuerpo, fecha de publicación e imagen.
+NOTICIA_DETAIL_SCHEMA = {
+    "name": "noticia_detail", "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "titulo": {"type": ["string", "null"], "description": "Título de la noticia. null si no se distingue."},
+            "cuerpo": {"type": ["string", "null"], "description": "Texto completo de la noticia, sin menús ni pies de página. Conserva párrafos."},
+            "fecha_publicacion": {"type": ["string", "null"], "description": "YYYY-MM-DD de publicación si aparece. null si no."},
+            "idioma": {"type": "string", "enum": ["ca", "es"], "description": "Idioma principal del texto."},
+            "imagen_url": {"type": ["string", "null"], "description": "URL absoluta de la imagen principal. null si no hay. NO iconos ni logos."},
+        },
+        "required": ["titulo", "cuerpo", "fecha_publicacion", "idioma", "imagen_url"],
+        "additionalProperties": False,
+    },
+}
+
+# Enriquecimiento de noticia: traducción bilingüe + tags. Sin categorías,
+# sin recinto, sin cartel-OCR (mucho más barato que el de eventos).
+NOTICIA_ENRICH_SCHEMA = {
+    "name": "noticia_enrichment", "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "titulo_ca": {"type": "string", "description": "Título en catalán (traduce si el original es castellano)."},
+            "titulo_es": {"type": "string", "description": "Título en castellano (traduce si el original es catalán)."},
+            "cuerpo_ca": {"type": "string", "description": "Cuerpo en catalán. '' si vacío."},
+            "cuerpo_es": {"type": "string", "description": "Cuerpo en castellano. '' si vacío."},
+            "tags_ca": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 8,
+                        "description": "3-8 tags GENÉRICOS en catalán (temática, ámbito, público). PROHIBIDO nombres propios."},
+            "tags_es": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 8,
+                        "description": "Mismos tags en castellano, mismo orden."},
+        },
+        "required": ["titulo_ca", "titulo_es", "cuerpo_ca", "cuerpo_es",
+                     "tags_ca", "tags_es"],
+        "additionalProperties": False,
+    },
+}
+
+# Clasificación en lote de mensajes de Telegram: cada mensaje es EVENTO (con
+# datos extraídos del propio texto), NOTICIA o DESCARTAR.
+TELEGRAM_BATCH_SCHEMA = {
+    "name": "telegram_mensajes", "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "mensajes": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "indice": {"type": "integer", "description": "Índice del mensaje tal como se ha numerado en la entrada."},
+                        "tipo": {
+                            "type": "string", "enum": ["EVENTO", "NOTICIA", "DESCARTAR"],
+                            "description": ("EVENTO: anuncia una actividad con fecha a la que asistir. "
+                                            "NOTICIA: información municipal (avisos, obras, comunicados, "
+                                            "resultados). DESCARTAR: saludos, reenvíos sin contenido, "
+                                            "encuestas, mensajes sin valor informativo."),
+                        },
+                        "titulo": {"type": ["string", "null"], "description": "Título corto y descriptivo deducido del mensaje (máx ~100 chars). null si DESCARTAR."},
+                        "fecha": {"type": ["string", "null"], "description": "Para EVENTO: YYYY-MM-DD de celebración si el texto la indica. null si no o si no es evento."},
+                        "hora_inicio": {"type": ["string", "null"], "description": "HH:MM del evento si aparece."},
+                        "lugar": {"type": ["string", "null"], "description": "Lugar del evento si aparece."},
+                    },
+                    "required": ["indice", "tipo", "titulo", "fecha", "hora_inicio", "lugar"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["mensajes"], "additionalProperties": False,
     },
 }
 
@@ -1154,16 +1430,110 @@ def enrich(oai, pob, ev: MergedEvent):
 # EXTRACCIÓN DE UNA FUENTE (un link) -> lista de Candidate
 # ============================================================================
 
+def procesar_item_evento(oai, http, pob, cp, it, listado_url, detail_cache, ctx) -> Candidate:
+    """Convierte un item de listado (titulo, fecha, url_detalle...) en Candidate,
+    bajando la página de detalle y aplicando cartel-OCR si procede. Compartido
+    por la ruta de eventos clásica, el clasificador mixto y Telegram.
+    ctx = {"details_done": int} (contador mutable compartido por fuente)."""
+    titulo = (it.get("titulo") or "").strip()
+    cand = Candidate(
+        poblacion=pob, cp=cp, titulo=titulo,
+        lugar=(it.get("lugar_corto") or "").strip(),
+        fuente_url=it.get("url_detalle") or listado_url,
+        fuente_listado=listado_url,
+        fecha_inicio=(it.get("fecha_inicio") or "").strip(),
+        hora_inicio=it.get("hora_inicio"),
+        hora_fin=it.get("hora_fin"),
+        imagenes=[it["imagen_url"]] if it.get("imagen_url") else [],
+    )
+
+    url_det = it.get("url_detalle")
+    if url_det and same_or_sub_domain(url_det, listado_url):
+        if url_det in detail_cache:
+            detail = detail_cache[url_det]
+        elif ctx["details_done"] >= MAX_DETAIL_PAGES_PER_SOURCE:
+            log.warning(f"    Tope de detalles ({MAX_DETAIL_PAGES_PER_SOURCE}) alcanzado")
+            detail = None
+        elif not url_ok(url_det, http):
+            log.warning(f"    URL de detalle rota, descartada: {url_det}")
+            detail = None
+        else:
+            try:
+                log.info(f"    Detalle [{ctx['details_done'] + 1}]: {titulo[:60]}")
+                detail = extract_detail(oai, pob, clean_html(download_html(url_det, http)), url_det)
+                detail_cache[url_det] = detail
+                ctx["details_done"] += 1
+            except Exception as e:
+                log.error(f"    Error en detalle {url_det}: {e}")
+                detail = None
+
+        if detail:
+            aplicar_detalle_a_candidato(oai, http, pob, cand, detail)
+
+    return cand
+
+
+def aplicar_detalle_a_candidato(oai, http, pob, cand: Candidate, detail: dict):
+    """Vuelca un dict de DETAIL_SCHEMA sobre el Candidate, con gate de
+    cartel-OCR si el detalle quedó incompleto."""
+    # Gate de cartel-OCR: si faltan datos clave Y hay imagen, intentar
+    # leer el cartel para rellenar huecos antes de aplicar al candidato.
+    if cartel_ocr_es_necesario(detail):
+        img_principal = detail["imagenes_urls"][0]
+        log.info(f"    Cartel-OCR: detalle incompleto, leyendo cartel...")
+        cartel = extract_cartel(oai, pob, http, img_principal,
+                                date.today().isoformat())
+        if cartel:
+            aplicar_cartel_al_detalle(detail, cartel)
+            log.info(f"    Cartel-OCR: datos del cartel aplicados")
+
+    cand.descripcion_larga = detail.get("descripcion_larga") or ""
+    cand.fecha_fin = detail.get("fecha_fin")
+    cand.hora_inicio = cand.hora_inicio or detail.get("hora_inicio")
+    cand.hora_fin = cand.hora_fin or detail.get("hora_fin")
+    if detail.get("lugar_nombre"):
+        cand.lugar = detail["lugar_nombre"]
+    cand.direccion_fisica = detail.get("direccion_fisica") or ""
+    cand.organizador_nombre = detail.get("organizador_nombre") or ""
+    if detail.get("es_gratuito") is not None:
+        cand.es_gratuito = 1 if detail["es_gratuito"] else 0
+    cand.precio_euros = detail.get("precio_euros")
+    cand.link_inscripcion = detail.get("link_inscripcion") or ""
+    if detail.get("imagenes_urls"):
+        cand.imagenes = detail["imagenes_urls"]
+    # Fechas discretas: si el LLM las detectó (HTML o cartel), construir Horario
+    disc = detail.get("horarios_discretos") or []
+    if disc:
+        cand.horarios_extra = [
+            Horario(
+                fecha_inicio=h["fecha"],
+                fecha_fin=None,
+                hora_inicio=h.get("hora_inicio"),
+                hora_fin=h.get("hora_fin"),
+            )
+            for h in disc if h.get("fecha")
+        ]
+        # Sincronizar: la primera fecha discreta pisa fecha_inicio del candidato
+        if cand.horarios_extra:
+            cand.fecha_inicio = cand.horarios_extra[0].fecha_inicio
+            cand.fecha_fin = None  # ya no es un rango continuo
+
+
 def scrape_source(oai, http, pob, cp, listado_url, dry_run,
-                  existing_titles=None, umbral=SIMILARITY_THRESHOLD,
-                  refresh=False) -> list:
-    existing_titles = existing_titles or []
+                  existing_events=None, umbral=SIMILARITY_THRESHOLD,
+                  refresh=False, confirmaciones=None, listing_html=None) -> list:
+    """Extrae candidatos de un listado de eventos. Si listing_html viene dado
+    (ruta de targets en BD, ya descargado por fetch_si_cambiado) no se vuelve a
+    descargar. confirmaciones: lista mutable donde se anotan (id_evento, url)
+    de los omitidos por ya existir, para registrar la fuente en EVENTO_FUENTES."""
+    existing_events = existing_events or []
     log.info(f"  Link: {listado_url}")
-    try:
-        listing_html = download_html(listado_url, http)
-    except httpx.HTTPError as e:
-        log.error(f"    No se pudo descargar el listado: {e}")
-        return []
+    if listing_html is None:
+        try:
+            listing_html = download_html(listado_url, http)
+        except httpx.HTTPError as e:
+            log.error(f"    No se pudo descargar el listado: {e}")
+            return []
 
     html_clean = clean_html(listing_html)
     log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars HTML limpio)...")
@@ -1172,7 +1542,7 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
 
     candidates = []
     detail_cache = {}
-    details_done = 0
+    ctx = {"details_done": 0}
     omitidos = 0  # ya existentes en BD: no se reprocesan (ahorro de coste)
 
     for it in items:
@@ -1185,87 +1555,17 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
         # suficientemente similar en esta población), se omite por completo: no
         # se baja el detalle, no se lee el cartel, no se enriquece ni se
         # descargan imágenes. Es el grueso del ahorro de coste por ejecución.
-        if not refresh and any(
-            titulos_similares(titulo, t, umbral) for t in existing_titles
-        ):
-            omitidos += 1
-            continue
+        if not refresh:
+            existente = buscar_evento_existente(titulo, existing_events, umbral)
+            if existente:
+                omitidos += 1
+                if confirmaciones is not None:
+                    confirmaciones.append(
+                        (existente["id"], it.get("url_detalle") or listado_url))
+                continue
 
-        cand = Candidate(
-            poblacion=pob, cp=cp, titulo=titulo,
-            lugar=(it.get("lugar_corto") or "").strip(),
-            fuente_url=it.get("url_detalle") or listado_url,
-            fuente_listado=listado_url,
-            fecha_inicio=fecha_inicio,
-            hora_inicio=it.get("hora_inicio"),
-            hora_fin=it.get("hora_fin"),
-            imagenes=[it["imagen_url"]] if it.get("imagen_url") else [],
-        )
-
-        url_det = it.get("url_detalle")
-        if url_det and same_or_sub_domain(url_det, listado_url):
-            if url_det in detail_cache:
-                detail = detail_cache[url_det]
-            elif details_done >= MAX_DETAIL_PAGES_PER_SOURCE:
-                log.warning(f"    Tope de detalles ({MAX_DETAIL_PAGES_PER_SOURCE}) alcanzado")
-                detail = None
-            elif not url_ok(url_det, http):
-                log.warning(f"    URL de detalle rota, descartada: {url_det}")
-                detail = None
-            else:
-                try:
-                    log.info(f"    Detalle [{details_done + 1}]: {titulo[:60]}")
-                    detail = extract_detail(oai, pob, clean_html(download_html(url_det, http)), url_det)
-                    detail_cache[url_det] = detail
-                    details_done += 1
-                except Exception as e:
-                    log.error(f"    Error en detalle {url_det}: {e}")
-                    detail = None
-
-            if detail:
-                # Gate de cartel-OCR: si faltan datos clave Y hay imagen, intentar
-                # leer el cartel para rellenar huecos antes de aplicar al candidato.
-                if cartel_ocr_es_necesario(detail):
-                    img_principal = detail["imagenes_urls"][0]
-                    log.info(f"    Cartel-OCR: detalle incompleto, leyendo cartel...")
-                    cartel = extract_cartel(oai, pob, http, img_principal,
-                                            date.today().isoformat())
-                    if cartel:
-                        aplicar_cartel_al_detalle(detail, cartel)
-                        log.info(f"    Cartel-OCR: datos del cartel aplicados")
-
-                cand.descripcion_larga = detail.get("descripcion_larga") or ""
-                cand.fecha_fin = detail.get("fecha_fin")
-                cand.hora_inicio = cand.hora_inicio or detail.get("hora_inicio")
-                cand.hora_fin = cand.hora_fin or detail.get("hora_fin")
-                if detail.get("lugar_nombre"):
-                    cand.lugar = detail["lugar_nombre"]
-                cand.direccion_fisica = detail.get("direccion_fisica") or ""
-                cand.organizador_nombre = detail.get("organizador_nombre") or ""
-                if detail.get("es_gratuito") is not None:
-                    cand.es_gratuito = 1 if detail["es_gratuito"] else 0
-                cand.precio_euros = detail.get("precio_euros")
-                cand.link_inscripcion = detail.get("link_inscripcion") or ""
-                if detail.get("imagenes_urls"):
-                    cand.imagenes = detail["imagenes_urls"]
-                # Fechas discretas: si el LLM las detectó (HTML o cartel), construir Horario
-                disc = detail.get("horarios_discretos") or []
-                if disc:
-                    cand.horarios_extra = [
-                        Horario(
-                            fecha_inicio=h["fecha"],
-                            fecha_fin=None,
-                            hora_inicio=h.get("hora_inicio"),
-                            hora_fin=h.get("hora_fin"),
-                        )
-                        for h in disc if h.get("fecha")
-                    ]
-                    # Sincronizar: la primera fecha discreta pisa fecha_inicio del candidato
-                    if cand.horarios_extra:
-                        cand.fecha_inicio = cand.horarios_extra[0].fecha_inicio
-                        cand.fecha_fin = None  # ya no es un rango continuo
-
-        candidates.append(cand)
+        candidates.append(
+            procesar_item_evento(oai, http, pob, cp, it, listado_url, detail_cache, ctx))
 
     if omitidos:
         log.info(f"    Omitidos por ya existir en BD: {omitidos} · "
@@ -1331,12 +1631,27 @@ def _build_merged_from_cluster(cluster: list, poblacion: str) -> MergedEvent:
     )
 
 
+def _mismo_evento(rep: Candidate, c: Candidate, umbral: float) -> bool:
+    """Criterio de fusión de dos candidatos de la misma población:
+      1. Títulos similares (>= umbral), o
+      2. Fechas solapadas + mismo lugar normalizado (no vacío). Cubre el caso
+         de fuentes que titulan distinto el mismo evento ('Concert FM' vs
+         'Gran concert de Festa Major') pero coinciden en cuándo y dónde."""
+    if titulos_similares(rep.titulo, c.titulo, umbral):
+        return True
+    lugar_rep = normalize_place(rep.lugar)
+    lugar_c = normalize_place(c.lugar)
+    if lugar_rep and lugar_c and lugar_rep == lugar_c and fechas_solapan(rep, c):
+        return True
+    return False
+
+
 def fusionar(candidates: list, umbral: float = SIMILARITY_THRESHOLD) -> list:
-    """Agrupa candidatos que son el mismo evento. Criterio único: misma población
-    + títulos similares (>= umbral). Las fechas NO condicionan la fusión: si son
-    el mismo evento en distintos horarios, se fusionan y se generan N entradas en
-    EVENTO_HORARIOS. Si son el mismo evento con horarios idénticos (duplicado real),
-    _build_merged_from_cluster los deduplica vía seen_h.
+    """Agrupa candidatos que son el mismo evento. Criterio principal: misma
+    población + títulos similares (>= umbral); secundario: fechas solapadas +
+    mismo lugar (ver _mismo_evento). Las fechas por sí solas NO condicionan la
+    fusión: si es el mismo evento en distintos horarios, se fusiona y se generan
+    N entradas en EVENTO_HORARIOS. Horarios idénticos se deduplican vía seen_h.
 
     Clustering incremental determinista: ordenado por título normalizado antes de
     agrupar, sin necesidad de marcar prioridad de fuentes."""
@@ -1354,7 +1669,7 @@ def fusionar(candidates: list, umbral: float = SIMILARITY_THRESHOLD) -> list:
             colocado = False
             for cluster in clusters:
                 rep = cluster[0]
-                if titulos_similares(rep.titulo, c.titulo, umbral):
+                if _mismo_evento(rep, c, umbral):
                     cluster.append(c)
                     colocado = True
                     break
@@ -1647,6 +1962,565 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
 
 
 # ============================================================================
+# TARGETS DESDE BD: selección, detección de cambios y estado
+# ============================================================================
+
+def load_targets_from_db(conn, solo_poblacion: Optional[str] = None) -> list:
+    """Targets activos desde SCRAPING_TARGETS + BIBLIOTECA_FUENTES + CIUDADES.
+    Devuelve dicts con todo lo necesario para procesar y actualizar cada target,
+    ordenados por población y prioridad de fuente."""
+    sql = """
+        SELECT t.ID_Target, t.ID_Fuente, t.Tipo_Target, t.Plataforma,
+               t.URL_Target, t.Estado, t.Frecuencia_Horas,
+               t.Http_ETag, t.Http_LastModified, t.Content_Fingerprint,
+               t.Capturas_Vacias_Consecutivas, t.Capturas_Utiles_Consecutivas,
+               f.Tipo_Fuente, f.Tipo_Contenido, f.Handle, f.Prioridad,
+               c.ID_Ciudad, c.Nombre AS Poblacion,
+               (SELECT cp.CP FROM CODIGOS_POSTALES cp
+                WHERE cp.ID_Ciudad = c.ID_Ciudad LIMIT 1) AS CP
+        FROM SCRAPING_TARGETS t
+        JOIN BIBLIOTECA_FUENTES f ON f.ID_Fuente = t.ID_Fuente
+        JOIN CIUDADES c ON c.ID_Ciudad = t.ID_Ciudad
+        WHERE t.Estado != 'PAUSADO' AND f.Activa = 1
+    """
+    params = []
+    if solo_poblacion:
+        sql += " AND c.Nombre = %s"
+        params.append(solo_poblacion)
+    sql += " ORDER BY c.Nombre, f.Prioridad, t.ID_Target"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
+
+
+def fetch_si_cambiado(http: httpx.Client, target_row: dict, refresh: bool):
+    """Descarga la URL del target SOLO si ha cambiado desde la última ejecución.
+
+    Cascade de coste:
+      1. GET condicional con If-None-Match / If-Modified-Since -> 304 = skip
+         sin descargar el cuerpo.
+      2. Fingerprint sha256 del HTML limpio -> si coincide con el guardado,
+         skip sin gastar ni una llamada LLM.
+    Con --refresh se ignoran ambos y se procesa siempre.
+
+    Devuelve (html | None, meta) donde meta = {etag, last_modified, fingerprint,
+    cambio: bool}. html=None significa 'sin cambios' (no es un error)."""
+    url = target_row["URL_Target"]
+    headers = {}
+    if not refresh:
+        if target_row.get("Http_ETag"):
+            headers["If-None-Match"] = target_row["Http_ETag"]
+        if target_row.get("Http_LastModified"):
+            headers["If-Modified-Since"] = target_row["Http_LastModified"]
+
+    r = http.get(url, follow_redirects=True, headers=headers)
+    if r.status_code == 304:
+        log.info(f"    Sin cambios (HTTP 304): {url}")
+        return None, {"etag": target_row.get("Http_ETag"),
+                      "last_modified": target_row.get("Http_LastModified"),
+                      "fingerprint": target_row.get("Content_Fingerprint"),
+                      "cambio": False}
+    r.raise_for_status()
+
+    html = r.text
+    fingerprint = hashlib.sha256(clean_html(html).encode("utf-8")).hexdigest()
+    meta = {"etag": r.headers.get("etag"),
+            "last_modified": r.headers.get("last-modified"),
+            "fingerprint": fingerprint, "cambio": True}
+
+    if not refresh and fingerprint == target_row.get("Content_Fingerprint"):
+        log.info(f"    Sin cambios (fingerprint idéntico): {url}")
+        meta["cambio"] = False
+        return None, meta
+
+    return html, meta
+
+
+def actualizar_target(conn, target_row: dict, ok: bool, meta: Optional[dict],
+                      utiles: int, error: Optional[str], dry_run: bool):
+    """Persiste el resultado de procesar un target: estado, ETag/fingerprint,
+    contadores de capturas y programación del siguiente run. Auto-pausa los
+    WEB_DETALLE agotados (página caducada) tras TARGET_MAX_VACIAS vacíos."""
+    if dry_run:
+        return
+    meta = meta or {}
+    cambio = bool(meta.get("cambio"))
+    estado = "OK" if ok else "ERROR"
+    vacias_prev = target_row.get("Capturas_Vacias_Consecutivas") or 0
+    utiles_prev = target_row.get("Capturas_Utiles_Consecutivas") or 0
+    if not ok or not cambio:
+        # error o skip 'sin cambios': los contadores de captura no se tocan
+        # (un skip por fingerprint NO es una captura vacía).
+        vacias, utiles_acum = vacias_prev, utiles_prev
+    elif utiles > 0:
+        vacias, utiles_acum = 0, utiles_prev + 1
+    else:
+        vacias, utiles_acum = vacias_prev + 1, 0
+    if (ok and cambio and utiles == 0 and target_row["Tipo_Target"] == "WEB_DETALLE"
+            and vacias >= TARGET_MAX_VACIAS):
+        estado = "PAUSADO"
+        log.info(f"    Target WEB_DETALLE agotado ({vacias} capturas vacías), pausado: "
+                 f"{target_row['URL_Target']}")
+    with conn.cursor() as cur:
+        cur.execute("""
+            UPDATE SCRAPING_TARGETS SET
+                Estado=%s,
+                Last_Run_At=NOW(),
+                Next_Run_At=DATE_ADD(NOW(), INTERVAL Frecuencia_Horas HOUR),
+                Intentos=IF(%s, 0, Intentos + 1),
+                Last_Error=%s,
+                Http_ETag=%s,
+                Http_LastModified=%s,
+                Content_Fingerprint=%s,
+                Last_Changed_At=IF(%s, NOW(), Last_Changed_At),
+                Capturas_Utiles_Consecutivas=%s,
+                Capturas_Vacias_Consecutivas=%s
+            WHERE ID_Target=%s
+        """, (estado, ok, (error or None),
+              meta.get("etag") or target_row.get("Http_ETag"),
+              meta.get("last_modified") or target_row.get("Http_LastModified"),
+              meta.get("fingerprint") or target_row.get("Content_Fingerprint"),
+              cambio, utiles_acum, vacias,
+              target_row["ID_Target"]))
+    conn.commit()
+
+
+def registrar_confirmaciones(conn, confirmaciones: list, id_fuente: int, dry_run: bool):
+    """Cuando la ingesta incremental omite un evento que ya existe, registra
+    igualmente que esta fuente lo confirma (EVENTO_FUENTES, Aporto_Extraccion=0).
+    Da trazabilidad multi-fuente sin reprocesar nada."""
+    if dry_run or not confirmaciones:
+        return
+    with conn.cursor() as cur:
+        for event_id, url_origen in confirmaciones:
+            cur.execute("""INSERT INTO EVENTO_FUENTES
+                (ID_Unico_Evento, ID_Fuente, URL_Origen, Es_Fuente_Principal, Aporto_Extraccion)
+                VALUES (%s,%s,%s,0,0)
+                ON DUPLICATE KEY UPDATE Fecha_Ultima_Confirmacion=NOW()""",
+                (event_id, id_fuente, url_origen))
+    conn.commit()
+
+
+# ============================================================================
+# CLASIFICADOR EVENTO/NOTICIA + PIPELINE DE NOTICIAS
+# ============================================================================
+
+def clasificar_items(oai, pob, html_clean, url, hint: str) -> list:
+    """Clasifica los items de un listado MIXTO o de NOTICIAS en
+    EVENTO/NOTICIA/DESCARTAR con una sola llamada LLM. El hint de la fuente
+    sesga el prompt pero el LLM decide por contenido."""
+    today = date.today().isoformat()
+    system = (
+        "Eres un clasificador de contenido de webs municipales catalanas. "
+        f"Hoy es {today}. Esta fuente suele contener: {hint}. "
+        "Para cada item del listado decide si es un EVENTO (actividad con fecha "
+        "a la que se puede asistir), una NOTICIA (información/comunicado) o "
+        "DESCARTAR (menús, banners, sin valor). Reglas: fechas absolutas "
+        "YYYY-MM-DD; URLs absolutas y reales, null si no hay (NUNCA inventes); "
+        "un item = una entrada, no dupliques."
+    )
+    user = f"URL listado: {url}\n\nHTML:\n{html_clean}"
+    data = llm_json(oai, pob, system, user, CLASIFICACION_SCHEMA,
+                    op="clasificacion", context=url)
+    items = data.get("items", [])
+    for it in items:
+        if it.get("url_detalle"):
+            it["url_detalle"] = urljoin(url, it["url_detalle"])
+        if it.get("imagen_url"):
+            it["imagen_url"] = urljoin(url, it["imagen_url"])
+    return items
+
+
+def buscar_noticia_existente(titulo: str, fecha_pub: Optional[str],
+                             existentes: list, umbral: float):
+    """Dedupe cross-fuente de noticias: misma población, título similar y
+    fecha de publicación a menos de 7 días (si ambas se conocen)."""
+    for n in existentes:
+        if not titulos_similares(titulo, n["titulo"], umbral):
+            continue
+        if fecha_pub and n.get("fecha"):
+            try:
+                f1 = date.fromisoformat(str(fecha_pub))
+                f2 = n["fecha"] if isinstance(n["fecha"], date) else date.fromisoformat(str(n["fecha"]))
+                if abs((f1 - f2).days) > 7:
+                    continue
+            except (ValueError, TypeError):
+                pass
+        return n
+    return None
+
+
+def extraer_noticia(oai, pob, html_clean, url) -> dict:
+    """Extrae el detalle de una noticia (cuerpo, fecha, imagen) de su página."""
+    system = ("Extractor de noticias de webs municipales. Devuelve JSON con el "
+              "texto completo de la noticia (sin menús ni navegación), su fecha "
+              "de publicación, idioma e imagen principal. No inventes datos.")
+    user = f"URL: {url}\n\nHTML:\n{html_clean}"
+    data = llm_json(oai, pob, system, user, NOTICIA_DETAIL_SCHEMA,
+                    op="noticia_detalle", context=url)
+    if data.get("imagen_url"):
+        data["imagen_url"] = urljoin(url, data["imagen_url"])
+    return data
+
+
+def enriquecer_noticia(oai, noticia: Noticia):
+    """Traducción bilingüe CA/ES + tags. Una sola llamada por noticia nueva."""
+    system = ("Enriqueces noticias municipales catalanas. Devuelve JSON con el "
+              "título y cuerpo en catalán Y castellano (traduce el que falte, "
+              "manteniendo nombres propios) y tags genéricos bilingües de "
+              "búsqueda (temática, ámbito; nunca nombres propios).")
+    user = (f"IDIOMA ORIGEN: {noticia.idioma}\n"
+            f"TÍTULO: {noticia.titulo}\n"
+            f"CUERPO:\n{noticia.cuerpo[:6000]}")
+    d = llm_json(oai, noticia.poblacion, system, user, NOTICIA_ENRICH_SCHEMA,
+                 op="noticia_enrich", context=noticia.titulo[:60])
+    # El título/cuerpo "canónicos" (CAT) se sustituyen por la versión del LLM
+    # para tener siempre ambos idiomas consistentes.
+    noticia.titulo = d["titulo_ca"] or noticia.titulo
+    noticia.cuerpo = d["cuerpo_ca"] or noticia.cuerpo
+    noticia.titulo_es = d["titulo_es"] or noticia.titulo
+    noticia.cuerpo_es = d["cuerpo_es"] or noticia.cuerpo
+    noticia.tags_ca = d["tags_ca"]
+    noticia.tags_es = d["tags_es"]
+
+
+def descargar_imagen_noticia(conn, http, nid: str, noticia: Noticia,
+                             target: IngestTarget):
+    """Descarga la imagen principal de la noticia (disco local o PUT Railway,
+    mismo endpoint que eventos) y la registra en NOTICIA_BINARIOS."""
+    url = noticia.imagen_url
+    if not url:
+        return None
+    try:
+        r = http.get(url, follow_redirects=True); r.raise_for_status()
+        content = r.content
+        if not (100 < len(content) <= MAX_IMAGE_SIZE_BYTES):
+            raise ValueError(f"tamaño sospechoso ({len(content)} bytes)")
+        img = Image.open(io.BytesIO(content)); img.verify()
+        img = Image.open(io.BytesIO(content))
+        w, h = img.size
+        fmt = (img.format or "JPEG").upper()
+        ext = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}.get(fmt, "jpg")
+        tipo = {"JPEG": "JPG", "PNG": "PNG", "WEBP": "WEBP"}.get(fmt, "JPG")
+        checksum = hashlib.sha256(content).hexdigest()
+        fname = f"00_{checksum[:12]}.{ext}"
+        if target.store_images_locally:
+            ndir = IMAGES_DIR / nid
+            ndir.mkdir(parents=True, exist_ok=True)
+            (ndir / fname).write_bytes(content)
+        else:
+            _upload_image_remote(http, target, nid, fname, content)
+        local_url = f"/static/images/{nid}/{fname}"
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO NOTICIA_BINARIOS
+                (ID_Unico_Noticia, Nombre_Archivo, Tipo_Archivo, URL_Almacenamiento_Nube,
+                 Es_Principal, Orden, Ancho_Px, Alto_Px, Orientacion,
+                 URL_Original_Externa, Checksum_SHA256)
+                VALUES (%s,%s,%s,%s,1,0,%s,%s,%s,%s,%s)""",
+                (nid, fname, tipo, local_url, w, h,
+                 determinar_orientacion(w, h), url, checksum))
+        COST.add_imagen(noticia.poblacion)
+        return local_url
+    except Exception as e:
+        log.error(f"    Imagen de noticia fallida {url}: {e}")
+        return None
+
+
+def persist_noticia(conn, http, noticia: Noticia, id_ciudad: int,
+                    target: IngestTarget) -> str:
+    """INSERT idempotente de una noticia + su imagen. Devuelve el id."""
+    nid = noticia_id(noticia.poblacion, noticia.titulo)
+    fecha_pub = noticia.fecha_publicacion or date.today().isoformat()
+    with conn.cursor() as cur:
+        cur.execute("""
+            INSERT INTO NOTICIAS_MASTER
+                (ID_Unico_Noticia, ID_Ciudad, ID_Fuente, Fuente_URL_Original,
+                 Titulo_CAT, Titulo_ES, Cuerpo_CAT, Cuerpo_ES, Tags_CAT, Tags_ES,
+                 Fecha_Publicacion, Fecha_Caducidad, Estado, Idioma_Origen)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                    DATE_ADD(%s, INTERVAL %s DAY),'ACTIVA',%s)
+            ON DUPLICATE KEY UPDATE
+                Titulo_ES=VALUES(Titulo_ES), Cuerpo_CAT=VALUES(Cuerpo_CAT),
+                Cuerpo_ES=VALUES(Cuerpo_ES), Tags_CAT=VALUES(Tags_CAT),
+                Tags_ES=VALUES(Tags_ES)
+        """, (nid, id_ciudad, noticia.id_fuente, noticia.fuente_url,
+              noticia.titulo, noticia.titulo_es or noticia.titulo,
+              noticia.cuerpo or "", noticia.cuerpo_es or "",
+              json.dumps(noticia.tags_ca, ensure_ascii=False),
+              json.dumps(noticia.tags_es, ensure_ascii=False),
+              fecha_pub, fecha_pub, NEWS_TTL_DIAS, noticia.idioma))
+    img_url = descargar_imagen_noticia(conn, http, nid, noticia, target)
+    if img_url:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE NOTICIAS_MASTER SET Imagen_Principal_URL=%s "
+                        "WHERE ID_Unico_Noticia=%s", (img_url, nid))
+    return nid
+
+
+def noticia_caducada(fecha_pub: Optional[str]) -> bool:
+    """True si una noticia ya nace caducada (más vieja que el TTL): no se ingiere."""
+    if not fecha_pub:
+        return False
+    try:
+        return date.fromisoformat(fecha_pub) < date.today() - timedelta(days=NEWS_TTL_DIAS)
+    except (ValueError, TypeError):
+        return False
+
+
+def procesar_item_noticia(oai, http, pob, it, listado_url) -> Optional[Noticia]:
+    """Convierte un item clasificado como NOTICIA en una Noticia, bajando su
+    página de detalle si tiene URL (si no, queda con el título del listado)."""
+    titulo = (it.get("titulo") or "").strip()
+    if not titulo:
+        return None
+    fecha_pub = it.get("fecha")
+    if noticia_caducada(fecha_pub):
+        log.info(f"    Noticia más vieja que el TTL, descartada: {titulo[:60]}")
+        return None
+    noticia = Noticia(
+        poblacion=pob, titulo=titulo,
+        fecha_publicacion=fecha_pub or date.today().isoformat(),
+        fuente_url=it.get("url_detalle") or listado_url,
+        imagen_url=it.get("imagen_url") or "",
+    )
+    url_det = it.get("url_detalle")
+    if url_det and same_or_sub_domain(url_det, listado_url) and url_ok(url_det, http):
+        try:
+            detail = extraer_noticia(oai, pob, clean_html(download_html(url_det, http)), url_det)
+            if detail.get("titulo"):
+                noticia.titulo = detail["titulo"].strip() or noticia.titulo
+            noticia.cuerpo = (detail.get("cuerpo") or "").strip()
+            if detail.get("fecha_publicacion"):
+                noticia.fecha_publicacion = detail["fecha_publicacion"]
+                if noticia_caducada(noticia.fecha_publicacion):
+                    log.info(f"    Noticia más vieja que el TTL, descartada: {titulo[:60]}")
+                    return None
+            noticia.idioma = detail.get("idioma") or "ca"
+            if detail.get("imagen_url"):
+                noticia.imagen_url = detail["imagen_url"]
+        except Exception as e:
+            log.error(f"    Error en detalle de noticia {url_det}: {e}")
+    return noticia
+
+
+# ============================================================================
+# CONECTOR TELEGRAM (canal público vía t.me/s/handle, sin API ni login)
+# ============================================================================
+
+def telegram_fetch_mensajes(http: httpx.Client, handle: str,
+                            max_paginas: int = TELEGRAM_MAX_PAGINAS) -> list:
+    """Descarga los mensajes recientes de un canal público de Telegram
+    parseando el HTML de t.me/s/{handle}. Paginación hacia atrás con ?before=
+    hasta max_paginas o hasta superar TELEGRAM_MAX_DIAS de antigüedad.
+
+    Devuelve [{id, fecha (YYYY-MM-DD), texto, imagen_url, links}] del más
+    reciente al más antiguo. Frágil por diseño (HTML no documentado): cualquier
+    fallo de parseo devuelve lo acumulado hasta ese momento."""
+    base = f"https://t.me/s/{handle}"
+    limite = date.today() - timedelta(days=TELEGRAM_MAX_DIAS)
+    mensajes, before = [], None
+
+    for _ in range(max_paginas):
+        url = f"{base}?before={before}" if before else base
+        try:
+            r = http.get(url, follow_redirects=True)
+            r.raise_for_status()
+        except httpx.HTTPError as e:
+            log.warning(f"    Telegram: fallo descargando {url}: {e}")
+            break
+
+        soup = BeautifulSoup(r.text, "lxml")
+        bloques = soup.select("div.tgme_widget_message")
+        if not bloques:
+            break
+
+        ids_pagina = []
+        for b in bloques:
+            data_post = b.get("data-post", "")  # formato: handle/12345
+            msg_id = data_post.split("/")[-1] if "/" in data_post else None
+            if not msg_id or not msg_id.isdigit():
+                continue
+            ids_pagina.append(int(msg_id))
+
+            t = b.select_one("time[datetime]")
+            fecha = (t["datetime"][:10] if t and t.has_attr("datetime") else None)
+
+            texto_el = b.select_one("div.tgme_widget_message_text")
+            texto = texto_el.get_text("\n", strip=True) if texto_el else ""
+
+            imagen_url = ""
+            foto = b.select_one("a.tgme_widget_message_photo_wrap")
+            if foto and foto.has_attr("style"):
+                m = re.search(r"background-image:\s*url\('([^']+)'\)", foto["style"])
+                if m:
+                    imagen_url = m.group(1)
+
+            links = [a["href"] for a in (texto_el.select("a[href]") if texto_el else [])
+                     if a.get("href", "").startswith("http")]
+
+            if texto or imagen_url:
+                mensajes.append({"id": int(msg_id), "fecha": fecha,
+                                 "texto": texto, "imagen_url": imagen_url,
+                                 "links": links})
+
+        if not ids_pagina:
+            break
+        # ¿La página ya es más antigua que la ventana? Paramos.
+        fechas_validas = [m["fecha"] for m in mensajes if m["fecha"]]
+        if fechas_validas:
+            try:
+                if date.fromisoformat(min(fechas_validas)) < limite:
+                    break
+            except ValueError:
+                pass
+        before = min(ids_pagina)
+
+    # Filtrar fuera de ventana y ordenar del más reciente al más antiguo
+    def en_ventana(m):
+        if not m["fecha"]:
+            return True
+        try:
+            return date.fromisoformat(m["fecha"]) >= limite
+        except ValueError:
+            return True
+
+    mensajes = [m for m in mensajes if en_ventana(m)]
+    mensajes.sort(key=lambda m: m["id"], reverse=True)
+    return mensajes
+
+
+def clasificar_mensajes_telegram(oai, pob, mensajes: list) -> list:
+    """Clasifica un lote de mensajes de Telegram en EVENTO/NOTICIA/DESCARTAR
+    con UNA llamada LLM. Devuelve la lista del schema (indice, tipo, ...)."""
+    if not mensajes:
+        return []
+    today = date.today().isoformat()
+    system = (
+        "Clasificas mensajes del canal de Telegram de un ayuntamiento catalán. "
+        f"Hoy es {today}. Para cada mensaje numerado decide: EVENTO si anuncia "
+        "una actividad con fecha a la que se puede asistir (extrae título, "
+        "fecha YYYY-MM-DD, hora y lugar del propio texto; convierte fechas "
+        "relativas); NOTICIA si es información municipal (avisos, obras, "
+        "comunicados, resultados); DESCARTAR si no aporta (saludos, reenvíos "
+        "vacíos, encuestas). No inventes fechas: null si el texto no la da."
+    )
+    partes = []
+    for i, m in enumerate(mensajes):
+        partes.append(f"[{i}] ({m['fecha'] or 'sin fecha'})\n{m['texto'][:900]}")
+    user = "\n\n---\n\n".join(partes)
+    data = llm_json(oai, pob, system, user, TELEGRAM_BATCH_SCHEMA,
+                    op="telegram", context=f"{len(mensajes)} mensajes")
+    return data.get("mensajes", [])
+
+
+def procesar_target_telegram(oai, http, target_row: dict, existing_events: list,
+                             existing_noticias: list, umbral: float,
+                             refresh: bool, confirmaciones: list):
+    """Procesa un canal de Telegram: fetch + clasificación batch + conversión a
+    candidatos de evento y noticias. Devuelve (candidatos, noticias, meta, n_utiles).
+
+    El fingerprint del target es el id del mensaje más reciente: si no hay
+    mensaje nuevo desde el último run, skip total sin llamada LLM."""
+    pob = target_row["Poblacion"]
+    cp = target_row["CP"]
+    handle = target_row["Handle"] or target_row["URL_Target"].rstrip("/").split("/")[-1]
+    log.info(f"  Telegram: @{handle}")
+
+    mensajes = telegram_fetch_mensajes(http, handle)
+    if not mensajes:
+        log.info("    Sin mensajes en la ventana temporal")
+        return [], [], {"cambio": False}, 0
+
+    fingerprint = hashlib.sha256(str(mensajes[0]["id"]).encode()).hexdigest()
+    meta = {"etag": None, "last_modified": None,
+            "fingerprint": fingerprint, "cambio": True}
+    if not refresh and fingerprint == target_row.get("Content_Fingerprint"):
+        log.info(f"    Sin mensajes nuevos desde el último run (último id {mensajes[0]['id']})")
+        meta["cambio"] = False
+        return [], [], meta, 0
+
+    log.info(f"    {len(mensajes)} mensajes en ventana, clasificando en lote...")
+    clasificados = clasificar_mensajes_telegram(oai, pob, mensajes)
+
+    candidatos, noticias = [], []
+    listado_url = f"https://t.me/s/{handle}"
+    for c in clasificados:
+        idx = c.get("indice")
+        if not isinstance(idx, int) or not (0 <= idx < len(mensajes)):
+            continue
+        m = mensajes[idx]
+        tipo = c.get("tipo")
+        titulo = (c.get("titulo") or "").strip()
+        if tipo == "DESCARTAR" or not titulo:
+            continue
+        url_msg = f"https://t.me/{handle}/{m['id']}"
+
+        if tipo == "EVENTO":
+            if not c.get("fecha"):
+                continue  # evento sin fecha no es persistible
+            existente = buscar_evento_existente(titulo, existing_events, umbral)
+            if existente and not refresh:
+                confirmaciones.append((existente["id"], url_msg))
+                continue
+            cand = Candidate(
+                poblacion=pob, cp=cp, titulo=titulo,
+                lugar=(c.get("lugar") or "").strip(),
+                fuente_url=url_msg, fuente_listado=listado_url,
+                fecha_inicio=c["fecha"],
+                hora_inicio=c.get("hora_inicio"),
+                descripcion_larga=m["texto"],
+                imagenes=[m["imagen_url"]] if m["imagen_url"] else [],
+            )
+            candidatos.append(cand)
+        elif tipo == "NOTICIA":
+            fecha_pub = m["fecha"] or date.today().isoformat()
+            if noticia_caducada(fecha_pub):
+                continue
+            if buscar_noticia_existente(titulo, fecha_pub, existing_noticias, umbral):
+                continue
+            noticias.append(Noticia(
+                poblacion=pob, titulo=titulo, fecha_publicacion=fecha_pub,
+                fuente_url=url_msg, cuerpo=m["texto"],
+                imagen_url=m["imagen_url"],
+                id_fuente=target_row["ID_Fuente"],
+            ))
+
+    log.info(f"    Telegram: {len(candidatos)} eventos nuevos, {len(noticias)} noticias nuevas")
+    return candidatos, noticias, meta, len(candidatos) + len(noticias)
+
+
+# ============================================================================
+# LOCK (evita ejecuciones simultáneas del cron)
+# ============================================================================
+
+def adquirir_lock() -> bool:
+    """Lock-file con PID+timestamp. Si existe y es reciente, hay otra ejecución
+    en marcha (False). Si es más viejo que LOCK_MAX_AGE_HORAS, se considera
+    huérfano y se sobreescribe."""
+    if LOCK_FILE.exists():
+        try:
+            edad_h = (time.time() - LOCK_FILE.stat().st_mtime) / 3600
+            if edad_h < LOCK_MAX_AGE_HORAS:
+                contenido = LOCK_FILE.read_text(encoding="utf-8", errors="ignore").strip()
+                log.error(f"Otra ejecución en marcha ({contenido}, hace {edad_h:.1f}h). "
+                          f"Si es un lock huérfano, borra {LOCK_FILE}")
+                return False
+            log.warning(f"Lock huérfano (hace {edad_h:.1f}h), se ignora")
+        except OSError:
+            pass
+    LOCK_FILE.write_text(f"pid={os.getpid()} inicio={datetime.now().isoformat(timespec='seconds')}",
+                         encoding="utf-8")
+    return True
+
+
+def liberar_lock():
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# ============================================================================
 # PIPELINE PRINCIPAL
 # ============================================================================
 
@@ -1762,9 +2636,260 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False,
         conn.close()
 
 
+def procesar_target_web(oai, http, target_row: dict, existing_events: list,
+                        existing_noticias: list, umbral: float, refresh: bool,
+                        dry_run: bool, confirmaciones: list):
+    """Procesa un target web (WEB_LISTADO, API_AGREGADOR o WEB_DETALLE) con
+    detección de cambios. Devuelve (candidatos, noticias, meta, n_utiles)."""
+    pob = target_row["Poblacion"]
+    cp = target_row["CP"]
+    url = target_row["URL_Target"]
+    hint = target_row.get("Tipo_Contenido") or "MIXTO"
+
+    html, meta = fetch_si_cambiado(http, target_row, refresh)
+    if html is None:
+        return [], [], meta, 0
+
+    # --- Página de detalle directa (un solo evento; típica de agregadores) ---
+    if target_row["Tipo_Target"] == "WEB_DETALLE":
+        detail = extract_detail(oai, pob, clean_html(html), url)
+        titulo = (detail.get("titulo") or "").strip()
+        fecha = (detail.get("fecha_inicio") or "").strip()
+        if not titulo or not (fecha or detail.get("horarios_discretos")):
+            log.info(f"    Detalle sin evento identificable (¿caducado?): {url}")
+            return [], [], meta, 0
+        existente = None if refresh else buscar_evento_existente(titulo, existing_events, umbral)
+        if existente:
+            confirmaciones.append((existente["id"], url))
+            log.info(f"    Ya en BD, confirmada fuente: {titulo[:60]}")
+            return [], [], meta, 1
+        cand = Candidate(poblacion=pob, cp=cp, titulo=titulo,
+                         fuente_url=url, fuente_listado=url,
+                         fecha_inicio=fecha)
+        aplicar_detalle_a_candidato(oai, http, pob, cand, detail)
+        return [cand], [], meta, 1
+
+    # --- Listado de solo eventos: ruta clásica sin clasificador (coste 0 extra) ---
+    if hint == "EVENTOS":
+        cands = scrape_source(oai, http, pob, cp, url, dry_run,
+                              existing_events, umbral, refresh,
+                              confirmaciones, listing_html=html)
+        return cands, [], meta, len(cands) + len(confirmaciones)
+
+    # --- Listado MIXTO o de NOTICIAS: clasificar cada item ---
+    html_clean = clean_html(html)
+    log.info(f"    Clasificando listado {hint} ({len(html_clean):,} chars)...")
+    items = clasificar_items(oai, pob, html_clean, url, hint)
+    n_ev = sum(1 for i in items if i.get("tipo") == "EVENTO")
+    n_not = sum(1 for i in items if i.get("tipo") == "NOTICIA")
+    log.info(f"    {len(items)} items: {n_ev} eventos, {n_not} noticias, "
+             f"{len(items) - n_ev - n_not} descartados")
+
+    candidatos, noticias = [], []
+    detail_cache, ctx = {}, {"details_done": 0}
+    for it in items:
+        tipo = it.get("tipo")
+        titulo = (it.get("titulo") or "").strip()
+        if not titulo or tipo == "DESCARTAR":
+            continue
+        if tipo == "EVENTO":
+            existente = None if refresh else buscar_evento_existente(titulo, existing_events, umbral)
+            if existente:
+                confirmaciones.append((existente["id"], it.get("url_detalle") or url))
+                continue
+            item_ev = {"titulo": titulo, "fecha_inicio": it.get("fecha") or "",
+                       "hora_inicio": it.get("hora_inicio"), "hora_fin": None,
+                       "url_detalle": it.get("url_detalle"),
+                       "lugar_corto": it.get("lugar_corto"),
+                       "imagen_url": it.get("imagen_url")}
+            candidatos.append(
+                procesar_item_evento(oai, http, pob, cp, item_ev, url, detail_cache, ctx))
+        elif tipo == "NOTICIA":
+            if not refresh and buscar_noticia_existente(
+                    titulo, it.get("fecha"), existing_noticias, umbral):
+                continue
+            noticia = procesar_item_noticia(oai, http, pob, it, url)
+            if noticia:
+                noticia.id_fuente = target_row["ID_Fuente"]
+                noticias.append(noticia)
+
+    return candidatos, noticias, meta, len(candidatos) + len(noticias)
+
+
+def run_db(dry_run: bool, umbral: float, refresh: bool = False,
+           target_name: str = "local", api_base_url: Optional[str] = None,
+           solo_poblacion: Optional[str] = None):
+    """Pipeline dirigido por BD: las fuentes/targets salen de BIBLIOTECA_FUENTES
+    + SCRAPING_TARGETS (cargadas con scripts/import_fuentes.py). Es el modo
+    pensado para el cron diario: detección de cambios por URL, ingesta
+    incremental, clasificación evento/noticia y limpieza, todo en una pasada."""
+    if not os.getenv("OPENAI_API_KEY"):
+        sys.exit("Falta OPENAI_API_KEY en .env")
+
+    ingest_target = resolve_ingest_target(target_name, api_base_url)
+    oai = make_openai_client()
+    http = make_http_client()
+    conn = get_connection(ingest_target)
+
+    coords_cache, fuente_cache = {}, {}
+    resumen = {"OK": 0, "SKIP": 0, "ERROR": 0}
+
+    try:
+        cat_map = load_categorias_map(conn)
+        if not cat_map:
+            sys.exit("CATEGORIAS vacía. Ejecuta reset_catalogo_categorias.sql primero.")
+        log.info(f"Categorías en BD: {len(cat_map)}")
+        log.info(f"Umbral de fusión de títulos: {umbral}")
+        log.info(f"Destino: {ingest_target.name} -> "
+                 f"{ingest_target.db_host}:{ingest_target.db_port}/{ingest_target.db_name}")
+        if ingest_target.store_images_locally:
+            log.info(f"Imágenes: disco local ({IMAGES_DIR})")
+        else:
+            log.info(f"Imágenes: subida directa a Railway ({ingest_target.api_base_url})")
+            verify_railway_upload_access(http, ingest_target)
+            log.info("API de imágenes: acceso verificado")
+
+        # 0. Limpieza inicial
+        purge_past_events(conn, http, ingest_target, dry_run)
+        purge_past_horarios(conn, dry_run)
+        purge_noticias_caducadas(conn, http, ingest_target, dry_run)
+
+        # Estado para la ingesta incremental (tras la limpieza)
+        if refresh:
+            existing_by_pob, noticias_by_pob = {}, {}
+            log.info("--refresh activo: se reprocesa TODO (sin omitir existentes)")
+        else:
+            existing_by_pob = load_existing_events(conn)
+            noticias_by_pob = load_existing_noticias(conn)
+            log.info(f"Ya en BD: {sum(len(v) for v in existing_by_pob.values())} eventos, "
+                     f"{sum(len(v) for v in noticias_by_pob.values())} noticias "
+                     f"(se omitirán si reaparecen)")
+
+        # Targets desde BD
+        targets = load_targets_from_db(conn, solo_poblacion)
+        if not targets:
+            sys.exit("No hay targets activos en SCRAPING_TARGETS. "
+                     "Carga las semillas con: python scripts/import_fuentes.py "
+                     "--input scripts/fuentes/Malgrat.json")
+        log.info(f"Targets activos: {len(targets)}"
+                 + (f" (solo {solo_poblacion})" if solo_poblacion else ""))
+
+        # Agrupar por población conservando el orden por prioridad
+        por_poblacion = {}
+        for t in targets:
+            por_poblacion.setdefault(t["Poblacion"], []).append(t)
+
+        for pob, rows in por_poblacion.items():
+            log.info("=" * 64)
+            log.info(f"POBLACIÓN: {pob}  ({len(rows)} targets)")
+            existing_events = existing_by_pob.get(pob, [])
+            existing_noticias = noticias_by_pob.get(pob, [])
+            candidates, noticias_nuevas = [], []
+
+            for t in rows:
+                confirmaciones = []
+                try:
+                    if t["Tipo_Target"] in ("SOCIAL_PERFIL", "SOCIAL_QUERY"):
+                        if t.get("Plataforma") == "TELEGRAM":
+                            cands, nots, meta, utiles = procesar_target_telegram(
+                                oai, http, t, existing_events, existing_noticias,
+                                umbral, refresh, confirmaciones)
+                        else:
+                            # IG/FB/X/YouTube: conector Apify pendiente (fase 2).
+                            # No deberían tener target activo; defensa por si acaso.
+                            log.info(f"  Plataforma {t.get('Plataforma')} sin conector "
+                                     f"(fase 2), target ignorado: {t['URL_Target']}")
+                            continue
+                    else:
+                        cands, nots, meta, utiles = procesar_target_web(
+                            oai, http, t, existing_events, existing_noticias,
+                            umbral, refresh, dry_run, confirmaciones)
+
+                    candidates.extend(cands)
+                    noticias_nuevas.extend(nots)
+                    registrar_confirmaciones(conn, confirmaciones,
+                                             t["ID_Fuente"], dry_run)
+                    actualizar_target(conn, t, True, meta, utiles, None, dry_run)
+                    resumen["OK" if meta.get("cambio") else "SKIP"] += 1
+                except Exception as e:
+                    log.error(f"  ERROR en target {t['URL_Target']}: {e}")
+                    actualizar_target(conn, t, False, None, 0, str(e)[:500], dry_run)
+                    resumen["ERROR"] += 1
+
+            log.info(f"  Candidatos nuevos: {len(candidates)} eventos, "
+                     f"{len(noticias_nuevas)} noticias")
+
+            # --- Eventos: fusión + filtro + enriquecimiento + persistencia ---
+            merged = fusionar(candidates, umbral)
+            if candidates:
+                log.info(f"  Tras fusión (umbral {umbral}): {len(merged)} eventos únicos")
+            persistidos = 0
+            for ev in merged:
+                if not filtrar_futuro(ev):
+                    continue
+                enrich(oai, pob, ev)
+                if not dry_run:
+                    try:
+                        persist_event(conn, oai, http, ev, cat_map, coords_cache,
+                                      fuente_cache, dry_run, ingest_target)
+                        conn.commit()
+                        persistidos += 1
+                    except Exception as e:
+                        conn.rollback()
+                        log.error(f"  ERROR persistiendo '{ev.titulo[:50]}': {e}", exc_info=True)
+                else:
+                    persistidos += 1
+            COST.add_evento(pob, persistidos)
+
+            # --- Noticias: dedupe intra-run + enriquecimiento + persistencia ---
+            noticias_persistidas = 0
+            vistas_run = []
+            id_ciudad = rows[0]["ID_Ciudad"]
+            for noticia in noticias_nuevas:
+                if buscar_noticia_existente(noticia.titulo, noticia.fecha_publicacion,
+                                            vistas_run, umbral):
+                    continue
+                vistas_run.append({"id": "", "titulo": noticia.titulo,
+                                   "fecha": noticia.fecha_publicacion})
+                if not dry_run:
+                    try:
+                        enriquecer_noticia(oai, noticia)
+                        persist_noticia(conn, http, noticia, id_ciudad, ingest_target)
+                        conn.commit()
+                        noticias_persistidas += 1
+                    except Exception as e:
+                        conn.rollback()
+                        log.error(f"  ERROR persistiendo noticia "
+                                  f"'{noticia.titulo[:50]}': {e}", exc_info=True)
+                else:
+                    noticias_persistidas += 1
+            log.info(f"  Persistidos en {pob}: {persistidos} eventos, "
+                     f"{noticias_persistidas} noticias")
+
+        # Limpieza final + sincronización
+        purge_binarios_huerfanos(conn, ingest_target, dry_run)
+        sync_remote_binarios(conn, http, ingest_target, dry_run)
+
+        log.info("=" * 64)
+        log.info(f"RESUMEN DE TARGETS: {resumen['OK']} con cambios · "
+                 f"{resumen['SKIP']} sin cambios (skip) · {resumen['ERROR']} con error")
+        COST.report()
+        if dry_run:
+            log.info("(dry-run: no se ha tocado la BD ni descargado imágenes)")
+
+    finally:
+        http.close()
+        conn.close()
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Pipeline completo de ingesta de eventos (un proceso).")
-    ap.add_argument("--input", help="JSON de poblaciones/links (no requerido con --sync-images-only)")
+    ap = argparse.ArgumentParser(
+        description=("Pipeline completo de ingesta de eventos y noticias (un proceso). "
+                     "Sin --input lee las fuentes de la BD (BIBLIOTECA_FUENTES + "
+                     "SCRAPING_TARGETS, modo cron); con --input usa el JSON plano legacy."))
+    ap.add_argument("--input", help=("JSON legacy de poblaciones/links. Si se omite, "
+                                     "las fuentes salen de la BD (recomendado; "
+                                     "cargar antes con scripts/import_fuentes.py)"))
     ap.add_argument("--sync-images-only", action="store_true",
                     help="Solo re-descarga y sube a Railway las imágenes que falten en el servidor")
     ap.add_argument("--dry-run", action="store_true", help="No toca BD ni descarga imágenes")
@@ -1773,9 +2898,11 @@ def main():
                           f"población con títulos parecidos. Default {SIMILARITY_THRESHOLD}. "
                           f"Más alto = más estricto (menos fusiones)."))
     ap.add_argument("--refresh", action="store_true",
-                    help=("Reprocesa TODOS los eventos, incluidos los que ya existen en "
-                          "la BD. Por defecto (sin este flag) la ingesta es incremental: "
-                          "los eventos ya registrados se omiten para ahorrar coste."))
+                    help=("Reprocesa TODO: ignora la omisión incremental de eventos/noticias "
+                          "ya en BD y la detección de cambios por URL (ETag/fingerprint). "
+                          "Por defecto la ingesta es incremental para ahorrar coste."))
+    ap.add_argument("--solo-poblacion", default=None, metavar="NOMBRE",
+                    help="Procesa solo los targets de esa población (solo modo BD)")
     ap.add_argument("--target", choices=("local", "railway"), default="local",
                     help=("Destino de la ingesta: 'local' usa DB_* (Docker); "
                           "'railway' usa RAILWAY_DB_* y sube imágenes al servidor API."))
@@ -1786,10 +2913,18 @@ def main():
     if args.sync_images_only:
         run_sync_images_only(args.target, args.api_base_url, args.dry_run)
         return
-    if not args.input:
-        ap.error("--input es obligatorio salvo con --sync-images-only")
-    run(Path(args.input), args.dry_run, args.umbral, args.refresh,
-        args.target, args.api_base_url)
+
+    if not adquirir_lock():
+        sys.exit(1)
+    try:
+        if args.input:
+            run(Path(args.input), args.dry_run, args.umbral, args.refresh,
+                args.target, args.api_base_url)
+        else:
+            run_db(args.dry_run, args.umbral, args.refresh,
+                   args.target, args.api_base_url, args.solo_poblacion)
+    finally:
+        liberar_lock()
 
 
 if __name__ == "__main__":

@@ -68,3 +68,6 @@ dmypy.json
 
 # Vite
 .vite/
+
+# Ingesta: lock del cron
+scripts/.ingest.lock
