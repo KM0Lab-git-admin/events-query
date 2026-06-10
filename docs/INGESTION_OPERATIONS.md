@@ -459,15 +459,30 @@ python scripts/import_fuentes.py --input scripts/fuentes/Blanes.json  --target l
 # 3. Ejecutar el pipeline (modo BD, el del cron)
 python scripts/ingest_all.py --target local
 python scripts/ingest_all.py --target railway          # contra producción
+python scripts/ingest_all.py --target both             # extrae 1 vez, persiste en AMBAS BDs
 python scripts/ingest_all.py --solo-poblacion "Malgrat de Mar"
 python scripts/ingest_all.py --dry-run                 # no escribe (SÍ gasta LLM)
 python scripts/ingest_all.py --refresh                 # ignora incremental y fingerprints
+python scripts/ingest_all.py --hard-reset --target both  # borra datos de ingesta y reingesta de cero
 ```
+
+**`--target both`**: la extracción y las llamadas LLM se hacen UNA sola vez y
+se persiste en las dos BDs. La local es la primaria (targets, estado
+incremental y fingerprints salen de ella); Railway recibe los mismos datos.
+
+**`--hard-reset`**: vacía los datos generados por la ingesta (EVENTOS_MASTER y
+sus hijos, NOTICIAS_MASTER y binarios, RECINTOS, imágenes en disco/remoto) y
+resetea el estado de SCRAPING_TARGETS para que todo se reprocese. NO toca
+CATEGORIAS, CIUDADES, CODIGOS_POSTALES ni BIBLIOTECA_FUENTES.
+
+**Vigencia de noticias**: solo se ingieren noticias publicadas en los últimos
+`NEWS_VIGENCIA_DIAS` días (default **5**; env var). Al caducar se BORRAN
+físicamente de la BD con sus binarios (sin archivado).
 
 ### Orden interno del run (modo BD)
 
 1. Purga de eventos pasados + horarios sueltos caducados + noticias caducadas
-   (TTL `NEWS_TTL_DIAS`, default 45 días; archivado y borrado definitivo a 90 días).
+   (vigencia `NEWS_VIGENCIA_DIAS`, default 5 días; borrado físico con binarios).
 2. Carga de eventos/noticias existentes (omisión incremental).
 3. Por población y target (orden de prioridad): detección de cambios
    (ETag/Last-Modified → 304; fingerprint sha256 del HTML limpio) → skip si no

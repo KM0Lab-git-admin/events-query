@@ -14,7 +14,11 @@ QUÉ HACE, EN ORDEN (modo BD)
 ----------------------------
   0. Limpieza inicial: borra eventos cuya última fecha ya pasó (con sus
      imágenes locales o remotas según --target), horarios sueltos caducados,
-     y archiva/borra noticias caducadas (TTL = NEWS_TTL_DIAS desde publicación).
+     y BORRA las noticias caducadas con sus binarios (vigencia =
+     NEWS_VIGENCIA_DIAS desde publicación, default 5).
+     Con --hard-reset, antes de todo se vacían los datos de ingesta (eventos,
+     noticias, binarios, recintos y estado de targets; las tablas maestras
+     como CATEGORIAS/CIUDADES/BIBLIOTECA_FUENTES se conservan).
   1. Carga targets activos de la BD, agrupados por población y prioridad.
   2. Por cada target, DETECCIÓN DE CAMBIOS por URL: GET condicional
      (ETag/Last-Modified -> 304) + fingerprint sha256 del HTML limpio. Si la
@@ -32,9 +36,10 @@ QUÉ HACE, EN ORDEN (modo BD)
   4. EVENTOS nuevos: detalle + cartel-OCR condicional -> FUSIÓN (título similar,
      o fechas solapadas + mismo lugar) -> filtro temporal -> enriquecimiento
      (traducción, tags, categorías, recinto) -> persistencia transaccional.
-  5. NOTICIAS nuevas: detalle -> dedupe cross-fuente (título similar ±7 días)
-     -> traducción CA/ES + tags -> NOTICIAS_MASTER + NOTICIA_BINARIOS
-     (Fecha_Caducidad = publicación + NEWS_TTL_DIAS).
+  5. NOTICIAS nuevas: solo las publicadas dentro de la ventana de vigencia ->
+     detalle -> dedupe cross-fuente (título similar ±7 días) -> traducción
+     CA/ES + tags -> NOTICIAS_MASTER + NOTICIA_BINARIOS
+     (Fecha_Caducidad = publicación + NEWS_VIGENCIA_DIAS).
   6. Limpieza de carpetas de imágenes huérfanas + sync de binarios remotos.
   7. Estado por target en SCRAPING_TARGETS (OK/ERROR/PAUSADO, ETag,
      fingerprint, contadores) + resumen de targets + informe de gasto LLM.
@@ -47,6 +52,8 @@ USO
 ---
     python ingest_all.py                            # fuentes desde BD (modo cron)
     python ingest_all.py --target railway           # ídem contra Railway
+    python ingest_all.py --target both              # extrae 1 vez, persiste en AMBAS BDs
+    python ingest_all.py --hard-reset --target both # vacía datos de ingesta y reingesta todo
     python ingest_all.py --solo-poblacion "Malgrat de Mar"
     python ingest_all.py --dry-run                  # no escribe BD/imágenes (SÍ gasta LLM)
     python ingest_all.py --refresh                  # ignora incremental y fingerprints
@@ -127,10 +134,11 @@ HTTP_USER_AGENT = "KM0EventsIngestion/0.2"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DETAIL_PAGES_PER_SOURCE = 60  # tope de seguridad de coste por link
 
-# Noticias: días de vigencia desde su publicación. Tras caducar se archivan
-# (Estado=ARCHIVADA, sin binarios) y a los 90 días se borran definitivamente.
-NEWS_TTL_DIAS = int(os.getenv("NEWS_TTL_DIAS", "45"))
-NEWS_ARCHIVO_DIAS = 90  # días extra en ARCHIVADA antes del DELETE definitivo
+# Noticias: días de vigencia desde su publicación. Solo se ingieren noticias
+# publicadas dentro de la ventana, y al caducar se BORRAN físicamente de la BD
+# junto con sus binarios (imágenes en disco/remoto).
+NEWS_VIGENCIA_DIAS = int(os.getenv("NEWS_VIGENCIA_DIAS")
+                         or os.getenv("NEWS_TTL_DIAS", "5"))
 
 # Telegram público (t.me/s/handle): paginación y ventana temporal.
 TELEGRAM_MAX_PAGINAS = 3
@@ -809,57 +817,97 @@ def load_existing_noticias(conn) -> dict:
 
 def purge_noticias_caducadas(conn, http: httpx.Client, target: IngestTarget,
                              dry_run: bool) -> int:
-    """Ciclo de vida de noticias: las ACTIVAS con Fecha_Caducidad < hoy pasan a
-    ARCHIVADA y pierden sus binarios (disco/remoto + NOTICIA_BINARIOS); las
-    ARCHIVADAS desde hace más de NEWS_ARCHIVO_DIAS se borran definitivamente."""
+    """Borra FÍSICAMENTE las noticias caducadas (publicadas hace más de
+    NEWS_VIGENCIA_DIAS) junto con sus binarios: filas de NOTICIA_BINARIOS
+    (CASCADE) e imágenes en disco local o servidor remoto. Las noticias no
+    se archivan: pasada la ventana de vigencia, fuera."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT ID_Unico_Noticia FROM NOTICIAS_MASTER
-            WHERE Estado='ACTIVA' AND Fecha_Caducidad IS NOT NULL
-              AND Fecha_Caducidad < CURDATE()
-        """)
-        a_archivar = [r["ID_Unico_Noticia"] for r in cur.fetchall()]
+            WHERE COALESCE(Fecha_Caducidad,
+                           DATE_ADD(Fecha_Publicacion, INTERVAL %s DAY)) < CURDATE()
+        """, (NEWS_VIGENCIA_DIAS,))
+        a_borrar = [r["ID_Unico_Noticia"] for r in cur.fetchall()]
 
-    if a_archivar:
-        log.info(f"Limpieza inicial: {len(a_archivar)} noticias caducadas a archivar")
-        if not dry_run:
-            for nid in a_archivar:
-                if target.store_images_locally:
-                    ndir = IMAGES_DIR / nid
-                    if ndir.exists():
-                        shutil.rmtree(ndir, ignore_errors=True)
-                else:
-                    try:
-                        _delete_event_images_remote(http, target, nid)
-                    except httpx.HTTPError as exc:
-                        log.warning(f"  No se pudieron borrar imágenes remotas de noticia {nid}: {exc}")
-                with conn.cursor() as cur:
-                    cur.execute("DELETE FROM NOTICIA_BINARIOS WHERE ID_Unico_Noticia=%s", (nid,))
-                    cur.execute("""UPDATE NOTICIAS_MASTER
-                        SET Estado='ARCHIVADA', Imagen_Principal_URL=NULL
-                        WHERE ID_Unico_Noticia=%s""", (nid,))
-            conn.commit()
-    else:
-        log.info("Limpieza inicial: no hay noticias caducadas que archivar")
+    if not a_borrar:
+        log.info("Limpieza inicial: no hay noticias caducadas que borrar")
+        return 0
 
-    # Borrado definitivo de archivadas antiguas (sin binarios ya).
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT COUNT(*) AS n FROM NOTICIAS_MASTER
-            WHERE Estado='ARCHIVADA'
-              AND Fecha_Caducidad < DATE_SUB(CURDATE(), INTERVAL %s DAY)
-        """, (NEWS_ARCHIVO_DIAS,))
-        n_borrar = cur.fetchone()["n"]
-    if n_borrar and not dry_run:
+    log.info(f"Limpieza inicial: {len(a_borrar)} noticias caducadas a borrar "
+             f"(vigencia {NEWS_VIGENCIA_DIAS} días)")
+    if dry_run:
+        return len(a_borrar)
+
+    for nid in a_borrar:
+        if target.store_images_locally:
+            ndir = IMAGES_DIR / nid
+            if ndir.exists():
+                shutil.rmtree(ndir, ignore_errors=True)
+        else:
+            try:
+                _delete_event_images_remote(http, target, nid)
+            except httpx.HTTPError as exc:
+                log.warning(f"  No se pudieron borrar imágenes remotas de noticia {nid}: {exc}")
         with conn.cursor() as cur:
-            cur.execute("""
-                DELETE FROM NOTICIAS_MASTER
-                WHERE Estado='ARCHIVADA'
-                  AND Fecha_Caducidad < DATE_SUB(CURDATE(), INTERVAL %s DAY)
-            """, (NEWS_ARCHIVO_DIAS,))
-        conn.commit()
-        log.info(f"Limpieza inicial: {n_borrar} noticias archivadas antiguas borradas")
-    return len(a_archivar)
+            # CASCADE limpia NOTICIA_BINARIOS
+            cur.execute("DELETE FROM NOTICIAS_MASTER WHERE ID_Unico_Noticia=%s", (nid,))
+    conn.commit()
+    return len(a_borrar)
+
+
+def hard_reset_datos(conn, http: httpx.Client, target: IngestTarget,
+                     dry_run: bool) -> None:
+    """Vacía TODOS los datos generados por la ingesta para empezar de cero:
+    eventos, noticias, sus binarios (BD + imágenes en disco/remoto), recintos
+    y el estado de los targets (fingerprints/contadores a cero para que todo
+    se reprocese). NO toca las tablas maestras/estructurales: CATEGORIAS,
+    CIUDADES, CODIGOS_POSTALES, BIBLIOTECA_FUENTES ni las filas de
+    SCRAPING_TARGETS (solo se resetea su estado)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM EVENTOS_MASTER")
+        n_ev = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM NOTICIAS_MASTER")
+        n_not = cur.fetchone()["n"]
+        # ids con binarios, para el borrado remoto de imágenes
+        cur.execute("SELECT DISTINCT ID_Unico_Evento AS id FROM BINARIOS_STORAGE")
+        ids_img = [r["id"] for r in cur.fetchall()]
+        cur.execute("SELECT DISTINCT ID_Unico_Noticia AS id FROM NOTICIA_BINARIOS")
+        ids_img += [r["id"] for r in cur.fetchall()]
+
+    log.warning(f"HARD RESET [{target.name}]: se borrarán {n_ev} eventos, "
+                f"{n_not} noticias y {len(ids_img)} carpetas de imágenes")
+    if dry_run:
+        return
+
+    # Imágenes
+    if target.store_images_locally:
+        if IMAGES_DIR.exists():
+            shutil.rmtree(IMAGES_DIR, ignore_errors=True)
+        IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    else:
+        for iid in ids_img:
+            try:
+                _delete_event_images_remote(http, target, iid)
+            except httpx.HTTPError as exc:
+                log.warning(f"  No se pudieron borrar imágenes remotas de {iid}: {exc}")
+
+    with conn.cursor() as cur:
+        # CASCADE limpia horarios, categorías, fuentes y binarios de cada evento
+        cur.execute("DELETE FROM EVENTOS_MASTER")
+        # CASCADE limpia NOTICIA_BINARIOS
+        cur.execute("DELETE FROM NOTICIAS_MASTER")
+        # Recintos: generados por la ingesta (ya sin eventos que los referencien)
+        cur.execute("DELETE FROM RECINTOS")
+        # Targets: misma configuración, estado a cero -> todo se reprocesa
+        cur.execute("""
+            UPDATE SCRAPING_TARGETS SET
+                Estado='PENDIENTE', Http_ETag=NULL, Http_LastModified=NULL,
+                Content_Fingerprint=NULL, Last_Changed_At=NULL,
+                Last_Run_At=NULL, Next_Run_At=NULL, Intentos=0, Last_Error=NULL,
+                Capturas_Utiles_Consecutivas=0, Capturas_Vacias_Consecutivas=0
+        """)
+    conn.commit()
+    log.warning(f"HARD RESET [{target.name}]: completado")
 
 
 def purge_binarios_huerfanos(conn, target: IngestTarget, dry_run: bool) -> int:
@@ -2298,7 +2346,7 @@ def persist_noticia(conn, http, noticia: Noticia, id_ciudad: int,
               noticia.cuerpo or "", noticia.cuerpo_es or "",
               json.dumps(noticia.tags_ca, ensure_ascii=False),
               json.dumps(noticia.tags_es, ensure_ascii=False),
-              fecha_pub, fecha_pub, NEWS_TTL_DIAS, noticia.idioma))
+              fecha_pub, fecha_pub, NEWS_VIGENCIA_DIAS, noticia.idioma))
     img_url = descargar_imagen_noticia(conn, http, nid, noticia, target)
     if img_url:
         with conn.cursor() as cur:
@@ -2308,11 +2356,14 @@ def persist_noticia(conn, http, noticia: Noticia, id_ciudad: int,
 
 
 def noticia_caducada(fecha_pub: Optional[str]) -> bool:
-    """True si una noticia ya nace caducada (más vieja que el TTL): no se ingiere."""
+    """True si la noticia queda FUERA de la ventana de vigencia: solo se
+    ingieren noticias publicadas en los últimos NEWS_VIGENCIA_DIAS días (las
+    antiguas no entran nunca, aunque la web las siga listando)."""
     if not fecha_pub:
         return False
     try:
-        return date.fromisoformat(fecha_pub) < date.today() - timedelta(days=NEWS_TTL_DIAS)
+        return date.fromisoformat(str(fecha_pub)[:10]) < (
+            date.today() - timedelta(days=NEWS_VIGENCIA_DIAS))
     except (ValueError, TypeError):
         return False
 
@@ -2773,55 +2824,83 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
 
 def run_db(dry_run: bool, umbral: float, refresh: bool = False,
            target_name: str = "local", api_base_url: Optional[str] = None,
-           solo_poblacion: Optional[str] = None):
+           solo_poblacion: Optional[str] = None, hard_reset: bool = False):
     """Pipeline dirigido por BD: las fuentes/targets salen de BIBLIOTECA_FUENTES
     + SCRAPING_TARGETS (cargadas con scripts/import_fuentes.py). Es el modo
     pensado para el cron diario: detección de cambios por URL, ingesta
-    incremental, clasificación evento/noticia y limpieza, todo en una pasada."""
+    incremental, clasificación evento/noticia y limpieza, todo en una pasada.
+
+    --target both: la extracción y TODAS las llamadas LLM se hacen UNA sola vez
+    y el resultado se persiste en ambas BDs (local y Railway). La BD local es
+    la primaria: de ella salen los targets, el estado incremental y los
+    fingerprints (las confirmaciones multi-fuente solo se registran en la
+    primaria; los IDs internos de fuente pueden diferir entre BDs).
+
+    --hard-reset: antes de empezar vacía los datos de ingesta en cada destino
+    (eventos, noticias, binarios, recintos, estado de targets) conservando las
+    tablas maestras. Combinado con la ingesta, equivale a 'empezar de cero'."""
     if not os.getenv("OPENAI_API_KEY"):
         sys.exit("Falta OPENAI_API_KEY en .env")
 
-    ingest_target = resolve_ingest_target(target_name, api_base_url)
+    nombres = ("local", "railway") if target_name == "both" else (target_name,)
     oai = make_openai_client()
     http = make_http_client()
-    conn = get_connection(ingest_target)
 
-    coords_cache, fuente_cache = {}, {}
+    # destinos: [{target, conn, cat_map, fuente_cache}] — el primero es el primario
+    destinos = []
+    for nombre in nombres:
+        tgt = resolve_ingest_target(nombre, api_base_url)
+        destinos.append({"target": tgt, "conn": get_connection(tgt),
+                         "fuente_cache": {}})
+
+    coords_cache = {}
     resumen = {"OK": 0, "SKIP": 0, "ERROR": 0}
+    primario = destinos[0]
 
     try:
-        cat_map = load_categorias_map(conn)
-        if not cat_map:
-            sys.exit("CATEGORIAS vacía. Ejecuta reset_catalogo_categorias.sql primero.")
-        log.info(f"Categorías en BD: {len(cat_map)}")
+        for d in destinos:
+            tgt = d["target"]
+            d["cat_map"] = load_categorias_map(d["conn"])
+            if not d["cat_map"]:
+                sys.exit(f"CATEGORIAS vacía en {tgt.name}. "
+                         f"Ejecuta reset_catalogo_categorias.sql primero.")
+            log.info(f"Destino: {tgt.name} -> {tgt.db_host}:{tgt.db_port}/{tgt.db_name} "
+                     f"({len(d['cat_map'])} categorías)")
+            if tgt.store_images_locally:
+                log.info(f"  Imágenes: disco local ({IMAGES_DIR})")
+            else:
+                log.info(f"  Imágenes: subida directa a Railway ({tgt.api_base_url})")
+                verify_railway_upload_access(http, tgt)
+                log.info("  API de imágenes: acceso verificado")
         log.info(f"Umbral de fusión de títulos: {umbral}")
-        log.info(f"Destino: {ingest_target.name} -> "
-                 f"{ingest_target.db_host}:{ingest_target.db_port}/{ingest_target.db_name}")
-        if ingest_target.store_images_locally:
-            log.info(f"Imágenes: disco local ({IMAGES_DIR})")
-        else:
-            log.info(f"Imágenes: subida directa a Railway ({ingest_target.api_base_url})")
-            verify_railway_upload_access(http, ingest_target)
-            log.info("API de imágenes: acceso verificado")
+        if target_name == "both":
+            log.info("--target both: extracción/LLM una sola vez; estado incremental "
+                     "y fingerprints en la BD primaria (local); persistencia en ambas")
 
-        # 0. Limpieza inicial
-        purge_past_events(conn, http, ingest_target, dry_run)
-        purge_past_horarios(conn, dry_run)
-        purge_noticias_caducadas(conn, http, ingest_target, dry_run)
+        # Hard reset opcional (por destino), antes de cualquier otra cosa
+        if hard_reset:
+            for d in destinos:
+                hard_reset_datos(d["conn"], http, d["target"], dry_run)
+
+        # 0. Limpieza inicial (por destino)
+        for d in destinos:
+            purge_past_events(d["conn"], http, d["target"], dry_run)
+            purge_past_horarios(d["conn"], dry_run)
+            purge_noticias_caducadas(d["conn"], http, d["target"], dry_run)
 
         # Estado para la ingesta incremental (tras la limpieza)
         if refresh:
             existing_by_pob, noticias_by_pob = {}, {}
             log.info("--refresh activo: se reprocesa TODO (sin omitir existentes)")
         else:
-            existing_by_pob = load_existing_events(conn)
-            noticias_by_pob = load_existing_noticias(conn)
+            existing_by_pob = load_existing_events(primario["conn"])
+            noticias_by_pob = load_existing_noticias(primario["conn"])
             log.info(f"Ya en BD: {sum(len(v) for v in existing_by_pob.values())} eventos, "
                      f"{sum(len(v) for v in noticias_by_pob.values())} noticias "
                      f"(se omitirán si reaparecen)")
 
-        # Targets desde BD
-        targets = load_targets_from_db(conn, solo_poblacion)
+        # Targets desde la BD primaria
+        targets = load_targets_from_db(primario["conn"], solo_poblacion)
         if not targets:
             sys.exit("No hay targets activos en SCRAPING_TARGETS. "
                      "Carga las semillas con: python scripts/import_fuentes.py "
@@ -2862,13 +2941,16 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
 
                     candidates.extend(cands)
                     noticias_nuevas.extend(nots)
-                    registrar_confirmaciones(conn, confirmaciones,
+                    # Confirmaciones y estado del target: solo en la primaria
+                    registrar_confirmaciones(primario["conn"], confirmaciones,
                                              t["ID_Fuente"], dry_run)
-                    actualizar_target(conn, t, True, meta, utiles, None, dry_run)
+                    actualizar_target(primario["conn"], t, True, meta, utiles,
+                                      None, dry_run)
                     resumen["OK" if meta.get("cambio") else "SKIP"] += 1
                 except Exception as e:
                     log.error(f"  ERROR en target {t['URL_Target']}: {e}")
-                    actualizar_target(conn, t, False, None, 0, str(e)[:500], dry_run)
+                    actualizar_target(primario["conn"], t, False, None, 0,
+                                      str(e)[:500], dry_run)
                     resumen["ERROR"] += 1
 
             log.info(f"  Candidatos nuevos: {len(candidates)} eventos, "
@@ -2883,47 +2965,66 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                 if not filtrar_futuro(ev):
                     continue
                 enrich(oai, pob, ev)
-                if not dry_run:
+                if dry_run:
+                    persistidos += 1
+                    continue
+                ok_alguno = False
+                for d in destinos:
                     try:
-                        persist_event(conn, oai, http, ev, cat_map, coords_cache,
-                                      fuente_cache, dry_run, ingest_target)
-                        conn.commit()
-                        persistidos += 1
+                        persist_event(d["conn"], oai, http, ev, d["cat_map"],
+                                      coords_cache, d["fuente_cache"], dry_run,
+                                      d["target"])
+                        d["conn"].commit()
+                        ok_alguno = True
                     except Exception as e:
-                        conn.rollback()
-                        log.error(f"  ERROR persistiendo '{ev.titulo[:50]}': {e}", exc_info=True)
-                else:
+                        d["conn"].rollback()
+                        log.error(f"  ERROR persistiendo '{ev.titulo[:50]}' en "
+                                  f"{d['target'].name}: {e}", exc_info=True)
+                if ok_alguno:
                     persistidos += 1
             COST.add_evento(pob, persistidos)
 
             # --- Noticias: dedupe intra-run + enriquecimiento + persistencia ---
             noticias_persistidas = 0
             vistas_run = []
-            id_ciudad = rows[0]["ID_Ciudad"]
             for noticia in noticias_nuevas:
                 if buscar_noticia_existente(noticia.titulo, noticia.fecha_publicacion,
                                             vistas_run, umbral):
                     continue
                 vistas_run.append({"id": "", "titulo": noticia.titulo,
                                    "fecha": noticia.fecha_publicacion})
-                if not dry_run:
+                if dry_run:
+                    noticias_persistidas += 1
+                    continue
+                try:
+                    enriquecer_noticia(oai, noticia)
+                except Exception as e:
+                    log.error(f"  ERROR enriqueciendo noticia "
+                              f"'{noticia.titulo[:50]}': {e}")
+                    continue
+                ok_alguno = False
+                for d in destinos:
                     try:
-                        enriquecer_noticia(oai, noticia)
-                        persist_noticia(conn, http, noticia, id_ciudad, ingest_target)
-                        conn.commit()
-                        noticias_persistidas += 1
+                        # ID de ciudad propio de cada BD (pueden diferir)
+                        id_ciudad_d = ensure_ciudad(d["conn"], oai, pob, coords_cache)
+                        persist_noticia(d["conn"], http, noticia, id_ciudad_d,
+                                        d["target"])
+                        d["conn"].commit()
+                        ok_alguno = True
                     except Exception as e:
-                        conn.rollback()
+                        d["conn"].rollback()
                         log.error(f"  ERROR persistiendo noticia "
-                                  f"'{noticia.titulo[:50]}': {e}", exc_info=True)
-                else:
+                                  f"'{noticia.titulo[:50]}' en {d['target'].name}: {e}",
+                                  exc_info=True)
+                if ok_alguno:
                     noticias_persistidas += 1
             log.info(f"  Persistidos en {pob}: {persistidos} eventos, "
                      f"{noticias_persistidas} noticias")
 
-        # Limpieza final + sincronización
-        purge_binarios_huerfanos(conn, ingest_target, dry_run)
-        sync_remote_binarios(conn, http, ingest_target, dry_run)
+        # Limpieza final + sincronización (por destino)
+        for d in destinos:
+            purge_binarios_huerfanos(d["conn"], d["target"], dry_run)
+            sync_remote_binarios(d["conn"], http, d["target"], dry_run)
 
         log.info("=" * 64)
         log.info(f"RESUMEN DE TARGETS: {resumen['OK']} con cambios · "
@@ -2934,7 +3035,11 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
 
     finally:
         http.close()
-        conn.close()
+        for d in destinos:
+            try:
+                d["conn"].close()
+            except Exception:
+                pass
 
 
 def main():
@@ -2958,16 +3063,29 @@ def main():
                           "Por defecto la ingesta es incremental para ahorrar coste."))
     ap.add_argument("--solo-poblacion", default=None, metavar="NOMBRE",
                     help="Procesa solo los targets de esa población (solo modo BD)")
-    ap.add_argument("--target", choices=("local", "railway"), default="local",
+    ap.add_argument("--target", choices=("local", "railway", "both"), default="local",
                     help=("Destino de la ingesta: 'local' usa DB_* (Docker); "
-                          "'railway' usa RAILWAY_DB_* y sube imágenes al servidor API."))
+                          "'railway' usa RAILWAY_DB_* y sube imágenes al servidor API; "
+                          "'both' extrae UNA vez y persiste en ambas BDs "
+                          "(la local actúa como primaria; solo modo BD)."))
+    ap.add_argument("--hard-reset", action="store_true",
+                    help=("ATENCIÓN: vacía los datos de ingesta del destino (eventos, "
+                          "noticias, binarios, recintos y estado de targets) antes de "
+                          "ingerir desde cero. Conserva CATEGORIAS, CIUDADES, "
+                          "CODIGOS_POSTALES y BIBLIOTECA_FUENTES/SCRAPING_TARGETS."))
     ap.add_argument("--api-base-url", default=None,
                     help=("URL base de la API en producción (solo con --target railway). "
                           "Por defecto EVENTS_API_BASE_URL o https://eventquery.km0lab.com"))
     args = ap.parse_args()
     if args.sync_images_only:
+        if args.target == "both":
+            ap.error("--sync-images-only requiere --target railway")
         run_sync_images_only(args.target, args.api_base_url, args.dry_run)
         return
+    if args.input and args.target == "both":
+        ap.error("--target both solo está soportado en modo BD (sin --input)")
+    if args.input and args.hard_reset:
+        ap.error("--hard-reset solo está soportado en modo BD (sin --input)")
 
     if not adquirir_lock():
         sys.exit(1)
@@ -2977,7 +3095,8 @@ def main():
                 args.target, args.api_base_url)
         else:
             run_db(args.dry_run, args.umbral, args.refresh,
-                   args.target, args.api_base_url, args.solo_poblacion)
+                   args.target, args.api_base_url, args.solo_poblacion,
+                   args.hard_reset)
     finally:
         liberar_lock()
 

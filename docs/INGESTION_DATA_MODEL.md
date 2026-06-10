@@ -521,9 +521,10 @@ es por antigüedad, no por fecha de celebración.
 - `ID_Unico_Noticia` CHAR(64): sha256 de `noticia|poblacion|titulo_norm`
   (mismo patrón determinista que los eventos).
 - Bilingüe: `Titulo_CAT/ES`, `Cuerpo_CAT/ES`, `Tags_CAT/ES` (JSON).
-- Vigencia: `Fecha_Caducidad = Fecha_Publicacion + NEWS_TTL_DIAS` (45 por
-  defecto). Al caducar: `Estado='ARCHIVADA'` + borrado de binarios; borrado
-  definitivo a los 90 días.
+- Vigencia: `Fecha_Caducidad = Fecha_Publicacion + NEWS_VIGENCIA_DIAS` (5 por
+  defecto). Solo se ingieren noticias publicadas dentro de la ventana; al
+  caducar se BORRAN físicamente con sus binarios (el ENUM Estado se mantiene
+  en el schema pero el ciclo de vida ya no usa ARCHIVADA).
 - `NOTICIA_BINARIOS`: espejo de BINARIOS_STORAGE con FK a NOTICIAS_MASTER
   ON DELETE CASCADE (BINARIOS_STORAGE tiene FK a EVENTOS_MASTER).
 - Dedupe cross-fuente: título similar en la misma ciudad con fecha de
