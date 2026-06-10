@@ -11,7 +11,9 @@ Nunca borra fuentes (desactivación manual en BD si hace falta).
 USO
 ---
     python scripts/import_fuentes.py --input scripts/fuentes/Malgrat.json
+    python scripts/import_fuentes.py --input scripts/fuentes/Malgrat.json --target local
     python scripts/import_fuentes.py --input scripts/fuentes/Malgrat.json --target railway
+    python scripts/import_fuentes.py --input scripts/fuentes/Malgrat.json --target both
     python scripts/import_fuentes.py --input scripts/fuentes/Blanes.json --dry-run
 
 FORMATO DE LA SEMILLA
@@ -255,10 +257,21 @@ def importar(input_path: Path, target_name: str, dry_run: bool):
 def main():
     ap = argparse.ArgumentParser(description="Importa semillas JSON de fuentes a BD.")
     ap.add_argument("--input", required=True, help="JSON de semilla (un municipio)")
-    ap.add_argument("--target", choices=("local", "railway"), default="local")
+    ap.add_argument(
+        "--target",
+        choices=("local", "railway", "both"),
+        default="both",
+        help="Destino: local (DB_*), railway (RAILWAY_DB_*) o both (ambos; por defecto)",
+    )
     ap.add_argument("--dry-run", action="store_true", help="Muestra qué haría sin escribir")
     args = ap.parse_args()
-    importar(Path(args.input), args.target, args.dry_run)
+    targets = ("local", "railway") if args.target == "both" else (args.target,)
+    for i, target_name in enumerate(targets):
+        if len(targets) > 1:
+            log.info("=" * 60)
+            log.info(f"Destino: {target_name.upper()}")
+            log.info("=" * 60)
+        importar(Path(args.input), target_name, args.dry_run)
 
 
 if __name__ == "__main__":

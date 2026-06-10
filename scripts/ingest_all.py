@@ -2663,7 +2663,7 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
             confirmaciones.append((existente["id"], url))
             log.info(f"    Ya en BD, confirmada fuente: {titulo[:60]}")
             return [], [], meta, 1
-        cand = Candidate(poblacion=pob, cp=cp, titulo=titulo,
+        cand = Candidate(poblacion=pob, cp=cp, titulo=titulo, lugar="",
                          fuente_url=url, fuente_listado=url,
                          fecha_inicio=fecha)
         aplicar_detalle_a_candidato(oai, http, pob, cand, detail)
