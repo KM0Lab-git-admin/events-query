@@ -440,6 +440,77 @@ Si los workers comparten BD con la API, vigilar el total: `(N_workers × DB_POOL
 
 ---
 
+## Ejecución del pipeline multi-fuente (fase 1 implementada)
+
+> Sección añadida en junio 2026 con la implementación real de `scripts/ingest_all.py`
+> en modo BD (eventos + noticias, targets en BD, detección de cambios).
+
+### Comandos
+
+```bash
+# 1. Aplicar deltas de schema (una vez)
+mysql -u USER -p events_db < SQL/fuentes_delta.sql
+mysql -u USER -p events_db < SQL/noticias_delta.sql
+
+# 2. Cargar las semillas de fuentes (idempotente, re-ejecutable)
+python scripts/import_fuentes.py --input scripts/fuentes/Malgrat.json --target local
+python scripts/import_fuentes.py --input scripts/fuentes/Blanes.json  --target local
+
+# 3. Ejecutar el pipeline (modo BD, el del cron)
+python scripts/ingest_all.py --target local
+python scripts/ingest_all.py --target railway          # contra producción
+python scripts/ingest_all.py --solo-poblacion "Malgrat de Mar"
+python scripts/ingest_all.py --dry-run                 # no escribe (SÍ gasta LLM)
+python scripts/ingest_all.py --refresh                 # ignora incremental y fingerprints
+```
+
+### Orden interno del run (modo BD)
+
+1. Purga de eventos pasados + horarios sueltos caducados + noticias caducadas
+   (TTL `NEWS_TTL_DIAS`, default 45 días; archivado y borrado definitivo a 90 días).
+2. Carga de eventos/noticias existentes (omisión incremental).
+3. Por población y target (orden de prioridad): detección de cambios
+   (ETag/Last-Modified → 304; fingerprint sha256 del HTML limpio) → skip si no
+   cambió; si cambió: extracción según tipo (EVENTOS directo; MIXTO/NOTICIAS con
+   clasificador; WEB_DETALLE extracción directa; Telegram batch).
+4. Eventos: fusión → filtro temporal → enriquecimiento → persistencia.
+5. Noticias: dedupe cross-fuente → traducción/tags → NOTICIAS_MASTER.
+6. Purga de carpetas de imágenes huérfanas + sync de binarios remotos.
+7. Resumen de targets (OK/SKIP/ERROR) + informe de gasto real de OpenAI.
+
+Un lock-file (`scripts/.ingest.lock`) impide ejecuciones simultáneas; un lock
+de más de 6 horas se considera huérfano y se ignora.
+
+### Programación del cron (documentado, NO activado)
+
+El comando es idempotente y barato en runs sin cambios. Cuando se decida
+activarlo, opciones:
+
+**Windows (Task Scheduler), en la máquina de ejecución:**
+```powershell
+schtasks /create /tn "KM0_Ingesta" /sc daily /st 06:00 `
+  /tr "C:\ruta\venv\Scripts\python.exe C:\ruta\events-query\scripts\ingest_all.py --target railway"
+```
+
+**Linux (crontab):**
+```cron
+0 6 * * * cd /ruta/events-query && ./venv/bin/python scripts/ingest_all.py --target railway >> logs/ingesta.log 2>&1
+```
+
+**Railway (cron job sobre el servicio):** añadir un servicio cron con schedule
+`0 6 * * *` que ejecute `python scripts/ingest_all.py --target railway`
+(requiere empaquetar scripts/ en el deploy y las env vars RAILWAY_DB_* +
+OPENAI_API_KEY en el servicio).
+
+### Redes sociales (fase 2)
+
+Instagram/Facebook/X/YouTube están registradas en `BIBLIOTECA_FUENTES` con
+`Activa=0` (las carga `import_fuentes.py` desde las semillas). El conector vía
+Apify se implementará en fase 2; al activarlo bastará poner `Activa=1` y crear
+su target. Telegram público (t.me/s/handle) SÍ está implementado en fase 1.
+
+---
+
 ## Backup y recuperación
 
 Las tablas del módulo se incluyen en el backup general de la BD (ver [`DEPLOYMENT.md`](./DEPLOYMENT.md)). Algunas consideraciones específicas:

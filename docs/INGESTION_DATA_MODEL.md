@@ -504,3 +504,54 @@ Reglas que deben mantenerse a nivel aplicación (algunas no se pueden expresar c
 **R10**: toda ejecución de un `SCRAPING_TARGET` produce **al menos una** fila en `AUDITORIA_SCRAPING`, independientemente del resultado. Incluso una ejecución con `SKIPPED_SIN_CAMBIOS` produce auditoría (con `Resultado = 'OK'` y `Detalle = 'no changes'`).
 
 **R11**: si `AUDITORIA_SCRAPING.Resultado = 'ERROR'`, el campo `Detalle` debe contener al menos: tipo de excepción, mensaje, primeros 200 caracteres del traceback. Esto es lo mínimo para debug.
+
+---
+
+## Apéndice (junio 2026): noticias y fuentes multi-contenido (fase 1 implementada)
+
+Cambios de schema implementados con la fase 1 del pipeline multi-fuente
+(deltas: `SQL/noticias_delta.sql` y `SQL/fuentes_delta.sql`):
+
+### NOTICIAS_MASTER + NOTICIA_BINARIOS
+
+Contenido informativo municipal (comunicados, avisos, noticias) separado de
+`EVENTOS_MASTER`: una noticia no tiene horarios ni recinto y su ciclo de vida
+es por antigüedad, no por fecha de celebración.
+
+- `ID_Unico_Noticia` CHAR(64): sha256 de `noticia|poblacion|titulo_norm`
+  (mismo patrón determinista que los eventos).
+- Bilingüe: `Titulo_CAT/ES`, `Cuerpo_CAT/ES`, `Tags_CAT/ES` (JSON).
+- Vigencia: `Fecha_Caducidad = Fecha_Publicacion + NEWS_TTL_DIAS` (45 por
+  defecto). Al caducar: `Estado='ARCHIVADA'` + borrado de binarios; borrado
+  definitivo a los 90 días.
+- `NOTICIA_BINARIOS`: espejo de BINARIOS_STORAGE con FK a NOTICIAS_MASTER
+  ON DELETE CASCADE (BINARIOS_STORAGE tiene FK a EVENTOS_MASTER).
+- Dedupe cross-fuente: título similar en la misma ciudad con fecha de
+  publicación a ±7 días (la misma noticia en el ayuntamiento y la radio local).
+
+### BIBLIOTECA_FUENTES.Tipo_Contenido
+
+`ENUM('EVENTOS','NOTICIAS','MIXTO')`, hint para el clasificador del pipeline:
+
+- `EVENTOS` → ruta de extracción clásica directa (sin clasificador, coste 0 extra).
+- `NOTICIAS`/`MIXTO` → clasificación LLM por item (EVENTO/NOTICIA/DESCARTAR).
+
+Es un sesgo, no determinante: el LLM decide por contenido.
+
+### ENUM Plataforma ampliado
+
+`+ 'YOUTUBE','TELEGRAM'` en BIBLIOTECA_FUENTES y SCRAPING_TARGETS. Telegram se
+modela como `Tipo_Fuente='RED_SOCIAL_PERFIL'` + `Plataforma='TELEGRAM'` con
+target `SOCIAL_PERFIL`; su conector (scraping de `t.me/s/{handle}`) está
+implementado en fase 1. IG/FB/X/YouTube quedan registradas con `Activa=0`
+hasta el conector Apify (fase 2).
+
+### Uso real de SCRAPING_TARGETS (fase 1)
+
+El pipeline usa: `Http_ETag`/`Http_LastModified` (GET condicional),
+`Content_Fingerprint` (sha256 del HTML limpio; en Telegram, del id del último
+mensaje), `Last_Changed_At`, `Last_Run_At`/`Next_Run_At` (+Frecuencia_Horas),
+`Estado` (OK/ERROR/PAUSADO; WEB_DETALLE se auto-pausa tras 3 capturas vacías),
+`Intentos`/`Last_Error` y los contadores de capturas. `Coverage_Score` y el
+scheduling adaptativo siguen pendientes (fase 2). `AUDITORIA_SCRAPING` y
+`CAPTURAS_RAW` siguen siendo diseño no implementado.
