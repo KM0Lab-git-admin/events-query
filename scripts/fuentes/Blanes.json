@@ -1,0 +1,27 @@
+{
+  "poblacion": "Blanes",
+  "codigos_postales": ["17300"],
+  "fuentes": [
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Ajuntament de Blanes",
+      "url": "https://www.blanes.cat/agenda",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Blanes Costa Brava — Agenda de eventos",
+      "url": "https://www.blanescostabrava.cat/es/agenda-eventos/",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Blanes",
+      "url": "https://www.esdeveniments.cat/blanes",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS"
+    }
+  ]
+}

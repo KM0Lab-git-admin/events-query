@@ -1,0 +1,203 @@
+{
+  "poblacion": "Malgrat de Mar",
+  "codigos_postales": ["08380"],
+  "fuentes": [
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Ajuntament de Malgrat",
+      "url": "https://www.ajmalgrat.cat/comunicacio/agenda",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Notícies Ajuntament de Malgrat",
+      "url": "https://www.ajmalgrat.cat/comunicacio/noticies",
+      "prioridad": 1,
+      "tipo_contenido": "NOTICIAS"
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Ona Malgrat (ràdio municipal)",
+      "url": "https://www.onamalgrat.cat/news",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Malgrat de Mar",
+      "url": "https://www.esdeveniments.cat/malgrat-de-mar",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Festival Libèl·lula (detalle)",
+      "url": "https://www.esdeveniments.cat/e/festival-libellula-tallers-circ-12-de-juny-del-2026-fcfafc8a-2a57-4097-bc10-42de90213e10",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Firavi (detalle)",
+      "url": "https://www.esdeveniments.cat/e/firavi-12-de-juny-del-2026-2f0e757f-77b3-4003-91f6-284ebe4efe73",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Fira Animalista (detalle)",
+      "url": "https://www.esdeveniments.cat/e/fira-animalista-13-de-juny-del-2026-d28dc6c5-40b0-44bf-bb85-1eacd33f6f0e",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — Festival Libèl·lula (detalle)",
+      "url": "https://www.turismemaresme.cat/es/descubre/agenda/2204/festival-libel-lula",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — Firavi (detalle)",
+      "url": "https://www.turismemaresme.cat/ca/descobreix/agenda/1679/firavi-a-malgrat-de-mar",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Fires Catalanes — Fira Animalista (detalle)",
+      "url": "https://firescatalanes.cat/fires/fira-animalista-malgrat-de-mar/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Fires Catalanes — Malgrat de Mar",
+      "url": "https://firescatalanes.cat/ubicacio/malgrat-de-mar/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "avui.info — Libèl·lula (detalle)",
+      "url": "https://www.avui.info/eventos/libel-lula",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "avui.info — Fira Animalista (detalle)",
+      "url": "https://www.avui.info/eventos/fira-animalista-malgrat",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "avui.info — Vespres Can Pins (detalle)",
+      "url": "https://www.avui.info/eventos/vespres-can-pins",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Entrapolis — Associació Aixafaroques (CA)",
+      "url": "https://www.entrapolis.com/entrades/associacio-aixafaroques",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Entrapolis — Associació Aixafaroques (ES)",
+      "url": "https://www.entrapolis.com/entradas/associacio-aixafaroques",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "TELEGRAM",
+      "handle": "AjuntamentdeMalgrat",
+      "nombre": "Telegram Ajuntament de Malgrat",
+      "url": "https://t.me/s/AjuntamentdeMalgrat",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO",
+      "activa": true
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
+      "handle": "ajmalgrat",
+      "nombre": "Instagram Ajuntament de Malgrat",
+      "url": "https://www.instagram.com/ajmalgrat/",
+      "prioridad": 1,
+      "tipo_contenido": "MIXTO",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "FACEBOOK",
+      "handle": "ajmalgrat",
+      "nombre": "Facebook Ajuntament de Malgrat",
+      "url": "https://www.facebook.com/ajmalgrat/",
+      "prioridad": 1,
+      "tipo_contenido": "MIXTO",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "X_TWITTER",
+      "handle": "ajmalgrat",
+      "nombre": "X/Twitter Ajuntament de Malgrat",
+      "url": "https://twitter.com/ajmalgrat",
+      "prioridad": 2,
+      "tipo_contenido": "NOTICIAS",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "YOUTUBE",
+      "handle": "ajmalgrat",
+      "nombre": "YouTube Ajuntament de Malgrat",
+      "url": "https://www.youtube.com/user/ajmalgrat",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
+      "handle": "visitmalgratdemar",
+      "nombre": "Instagram Visit Malgrat de Mar",
+      "url": "https://www.instagram.com/visitmalgratdemar/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "FACEBOOK",
+      "handle": "malgratturisme",
+      "nombre": "Facebook Malgrat Turisme",
+      "url": "https://www.facebook.com/malgratturisme/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    }
+  ]
+}
