@@ -1993,13 +1993,26 @@ def load_targets_from_db(conn, solo_poblacion: Optional[str] = None) -> list:
         return cur.fetchall()
 
 
+def content_fingerprint(html: str) -> str:
+    """Fingerprint del TEXTO VISIBLE de la página, no del markup.
+
+    El HTML suele llevar contenido dinámico que cambia en cada visita (tokens,
+    URLs de caché de imágenes, contadores) y haría que el fingerprint sobre el
+    markup detectara 'cambios' falsos en cada run, anulando el ahorro
+    (observado en turismemaresme.cat, firescatalanes.cat y avui.info). El texto
+    visible es estable: solo cambia si cambia el contenido real."""
+    texto = BeautifulSoup(clean_html(html), "lxml").get_text(" ", strip=True)
+    texto = re.sub(r"\s+", " ", texto)
+    return hashlib.sha256(texto.encode("utf-8")).hexdigest()
+
+
 def fetch_si_cambiado(http: httpx.Client, target_row: dict, refresh: bool):
     """Descarga la URL del target SOLO si ha cambiado desde la última ejecución.
 
     Cascade de coste:
       1. GET condicional con If-None-Match / If-Modified-Since -> 304 = skip
          sin descargar el cuerpo.
-      2. Fingerprint sha256 del HTML limpio -> si coincide con el guardado,
+      2. Fingerprint sha256 del texto visible -> si coincide con el guardado,
          skip sin gastar ni una llamada LLM.
     Con --refresh se ignoran ambos y se procesa siempre.
 
@@ -2023,7 +2036,7 @@ def fetch_si_cambiado(http: httpx.Client, target_row: dict, refresh: bool):
     r.raise_for_status()
 
     html = r.text
-    fingerprint = hashlib.sha256(clean_html(html).encode("utf-8")).hexdigest()
+    fingerprint = content_fingerprint(html)
     meta = {"etag": r.headers.get("etag"),
             "last_modified": r.headers.get("last-modified"),
             "fingerprint": fingerprint, "cambio": True}
