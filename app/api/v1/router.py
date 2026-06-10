@@ -4,7 +4,7 @@ API v1 Router - Aggregates all v1 endpoints.
 
 from fastapi import APIRouter
 
-from app.api.v1 import query, events, categories, health, ingest_sync
+from app.api.v1 import query, events, categories, health, ingest_sync, news
 
 # Create v1 router
 router = APIRouter(prefix="/api/v1")
@@ -15,3 +15,4 @@ router.include_router(events.router, tags=["Events"])
 router.include_router(categories.router, tags=["Categories"])
 router.include_router(health.router, tags=["Health"])
 router.include_router(ingest_sync.router, tags=["Ingest"])
+router.include_router(news.router, tags=["News"])
