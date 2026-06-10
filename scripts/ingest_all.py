@@ -9,8 +9,8 @@ recintos canónicos, imágenes descargadas y horarios agrupados.
 QUÉ HACE, EN ORDEN
 ------------------
   0. Limpieza inicial: borra de la BD los eventos cuya última fecha ya pasó
-     (y sus imágenes en disco) y, de los eventos vigentes, los horarios sueltos
-     que ya caducaron. La agenda solo contiene hoy y futuro.
+     (y sus imágenes: disco local o servidor remoto según --target) y, de los
+     eventos vigentes, los horarios sueltos que ya caducaron.
   1. Por cada población y cada link: descarga el listado, lo limpia y extrae
      los eventos con un LLM (extractor universal, sin selectores por web).
      INGESTA INCREMENTAL: los eventos del listado que YA existen en la BD
@@ -38,7 +38,10 @@ NO hace: embeddings (se generan aparte cuando se active la búsqueda semántica)
 USO
 ---
     python ingest_all.py --input fuentes.json
-    python ingest_all.py --input fuentes.json --dry-run   # no toca BD ni descarga imágenes
+    python ingest_all.py --input fuentes.json --target local      # Docker/local (default)
+    python ingest_all.py --input fuentes.json --target railway    # MySQL Railway + imágenes subidas al servidor (sin script aparte)
+    python ingest_all.py --sync-images-only --target railway      # solo repara imágenes rotas en Railway
+    python ingest_all.py --input fuentes.json --dry-run           # no toca BD ni descarga imágenes
 
 FORMATO DEL JSON DE ENTRADA
 ---------------------------
@@ -56,8 +59,11 @@ DEPENDENCIAS
 
 VARIABLES DE ENTORNO (.env)
 ---------------------------
-    OPENAI_API_KEY
-    DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+    OPENAI_API_KEY, OPENAI_TIMEOUT (o INGEST_OPENAI_TIMEOUT), OPENAI_MAX_RETRIES
+    --target local  -> DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
+    --target railway -> RAILWAY_DB_HOST, RAILWAY_DB_PORT, RAILWAY_DB_USER,
+                        RAILWAY_DB_PASSWORD, RAILWAY_DB_NAME
+                        (+ EVENTS_API_BASE_URL, INGEST_UPLOAD_SECRET o RAILWAY_DB_PASSWORD)
 """
 
 import argparse
@@ -71,6 +77,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -97,12 +104,7 @@ except ImportError:
 # ============================================================================
 
 LLM_MODEL = "gpt-4.1-mini"
-
-DB_HOST = os.getenv("DB_HOST", "localhost")
-DB_PORT = int(os.getenv("DB_PORT", "3306"))
-DB_USER = os.getenv("DB_USER")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME")
+DEFAULT_EVENTS_API_BASE_URL = "https://eventquery.km0lab.com"
 
 IMAGES_DIR = Path("static") / "images"
 
@@ -114,6 +116,8 @@ HTTP_TIMEOUT = 30
 HTTP_USER_AGENT = "KM0EventsIngestion/0.2"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DETAIL_PAGES_PER_SOURCE = 60  # tope de seguridad de coste por link
+OPENAI_TIMEOUT = float(os.getenv("INGEST_OPENAI_TIMEOUT") or os.getenv("OPENAI_TIMEOUT", "120"))
+OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "3"))
 
 # Umbral de similitud de títulos para fusionar eventos de la misma población
 # que vienen de webs distintas (p.ej. el mismo evento en catalán y castellano).
@@ -143,6 +147,135 @@ ALL_CATEGORY_SLUGS = [c[0] for c in CATEGORIES_FLAT]
 SUBCATEGORY_TO_PARENT = {c[0]: c[3] for c in CATEGORIES_FLAT if c[3] is not None}
 
 RECINTO_TIPOS = ["BIBLIOTECA", "CENTRO_CULTURAL", "TEATRO", "PARQUE", "OTRO"]
+
+
+# ============================================================================
+# DESTINO DE INGESTA (local Docker vs Railway remoto)
+# ============================================================================
+
+@dataclass
+class IngestTarget:
+    """Configuración de BD e imágenes según --target."""
+    name: str
+    db_host: str
+    db_port: int
+    db_user: str
+    db_password: str
+    db_name: str
+    api_base_url: Optional[str] = None
+    upload_secret: Optional[str] = None
+
+    @property
+    def store_images_locally(self) -> bool:
+        return self.name == "local"
+
+
+def _normalize_env(val: Optional[str]) -> str:
+    if not val:
+        return ""
+    v = val.strip()
+    if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
+        v = v[1:-1].strip()
+    return v
+
+
+def resolve_ingest_target(target: str, api_base_url: Optional[str] = None) -> IngestTarget:
+    """Resuelve credenciales de BD e imágenes según --target local|railway."""
+    if target == "local":
+        host = _normalize_env(os.getenv("DB_HOST", "localhost"))
+        port = int(_normalize_env(os.getenv("DB_PORT", "3306")) or "3306")
+        user = _normalize_env(os.getenv("DB_USER"))
+        password = _normalize_env(os.getenv("DB_PASSWORD"))
+        name = _normalize_env(os.getenv("DB_NAME"))
+        if not all([host, user, password, name]):
+            sys.exit("Faltan DB_HOST/DB_USER/DB_PASSWORD/DB_NAME en .env para --target local")
+        return IngestTarget("local", host, port, user, password, name)
+
+    if target == "railway":
+        host = _normalize_env(os.getenv("RAILWAY_DB_HOST"))
+        port = int(_normalize_env(os.getenv("RAILWAY_DB_PORT", "3306")) or "3306")
+        user = _normalize_env(os.getenv("RAILWAY_DB_USER"))
+        password = _normalize_env(os.getenv("RAILWAY_DB_PASSWORD"))
+        name = _normalize_env(os.getenv("RAILWAY_DB_NAME"))
+        if not all([host, user, password, name]):
+            sys.exit("Faltan RAILWAY_DB_HOST/USER/PASSWORD/NAME en .env para --target railway")
+        if host.endswith(".railway.internal") or host in ("mysql", "mysql.railway.internal"):
+            sys.exit("RAILWAY_DB_HOST debe ser el host PUBLICO (MYSQL_PUBLIC_URL), no mysql.railway.internal")
+        if host.startswith("mysql://"):
+            sys.exit("RAILWAY_DB_HOST debe ser solo el hostname, no mysql://...")
+        secret = _normalize_env(os.getenv("INGEST_UPLOAD_SECRET")) or password
+        base = (api_base_url or _normalize_env(os.getenv("EVENTS_API_BASE_URL"))
+                or DEFAULT_EVENTS_API_BASE_URL).rstrip("/")
+        return IngestTarget("railway", host, port, user, password, name, base, secret)
+
+    sys.exit(f"--target inválido: {target!r}. Usa 'local' o 'railway'.")
+
+
+def _ingest_api_url(target: IngestTarget, path: str) -> str:
+    return f"{target.api_base_url}{path}"
+
+
+def _upload_image_remote(http: httpx.Client, target: IngestTarget,
+                         event_id: str, filename: str, content: bytes) -> None:
+    url = _ingest_api_url(target, f"/api/v1/ingest/images/{event_id}/{filename}")
+    headers = {
+        "X-Ingest-Secret": target.upload_secret,
+        "Content-Type": "application/octet-stream",
+    }
+    r = http.put(url, content=content, headers=headers, timeout=120.0)
+    if r.status_code == 200:
+        log.info(f"    Imagen en Railway: {event_id[:12]}…/{filename} ({len(content):,} bytes)")
+    elif r.status_code == 409:
+        log.debug(f"    Imagen ya en Railway: {filename}")
+    else:
+        r.raise_for_status()
+
+
+def _remote_image_exists(http: httpx.Client, target: IngestTarget, storage_url: str) -> bool:
+    """True si el fichero responde 200 en la API de producción."""
+    if not storage_url:
+        return False
+    path = storage_url if storage_url.startswith("/") else f"/{storage_url}"
+    try:
+        r = http.head(_ingest_api_url(target, path), follow_redirects=True, timeout=30.0)
+        if r.status_code == 200:
+            return True
+        if r.status_code == 405:
+            r = http.get(_ingest_api_url(target, path), follow_redirects=True, timeout=30.0)
+            return r.status_code == 200
+        return False
+    except httpx.HTTPError:
+        return False
+
+
+def verify_railway_upload_access(http: httpx.Client, target: IngestTarget) -> None:
+    """Falla pronto si el secret o la API de subida no están operativos."""
+    probe_id = "0" * 64
+    probe_fn = "00_000000000000.jpg"
+    url = _ingest_api_url(target, f"/api/v1/ingest/images/{probe_id}/{probe_fn}")
+    headers = {
+        "X-Ingest-Secret": target.upload_secret,
+        "Content-Type": "application/octet-stream",
+    }
+    try:
+        r = http.put(url, content=b"", headers=headers, timeout=30.0)
+    except httpx.HTTPError as exc:
+        sys.exit(f"No se puede contactar la API de imágenes ({target.api_base_url}): {exc}")
+    if r.status_code == 401:
+        sys.exit("Secret de ingesta rechazado (401). Define INGEST_UPLOAD_SECRET en .env "
+                 "igual que en Railway, o usa RAILWAY_DB_PASSWORD si coincide con DB_PASSWORD del servidor.")
+    if r.status_code == 503:
+        sys.exit("La API remota no tiene configurado el upload de imágenes (503).")
+    if r.status_code not in (200, 400, 409, 413):
+        sys.exit(f"API de imágenes respondió HTTP {r.status_code}: {r.text[:200]}")
+
+
+def _delete_event_images_remote(http: httpx.Client, target: IngestTarget, event_id: str) -> None:
+    url = _ingest_api_url(target, f"/api/v1/ingest/images/{event_id}")
+    headers = {"X-Ingest-Secret": target.upload_secret}
+    r = http.delete(url, headers=headers, timeout=60.0)
+    if r.status_code not in (200, 404):
+        r.raise_for_status()
 
 
 # ============================================================================
@@ -450,12 +583,10 @@ class MergedEvent:
 # CONEXIÓN BD
 # ============================================================================
 
-def get_connection():
-    if not all([DB_HOST, DB_USER, DB_PASSWORD, DB_NAME]):
-        sys.exit("Faltan variables DB_HOST/DB_USER/DB_PASSWORD/DB_NAME en .env")
+def get_connection(target: IngestTarget):
     return pymysql.connect(
-        host=DB_HOST, port=DB_PORT, user=DB_USER, password=DB_PASSWORD,
-        database=DB_NAME, charset="utf8mb4",
+        host=target.db_host, port=target.db_port, user=target.db_user,
+        password=target.db_password, database=target.db_name, charset="utf8mb4",
         cursorclass=pymysql.cursors.DictCursor, autocommit=False,
     )
 
@@ -470,9 +601,9 @@ def load_categorias_map(conn) -> dict:
 # LIMPIEZA INICIAL: borrar eventos pasados + sus imágenes en disco
 # ============================================================================
 
-def purge_past_events(conn, dry_run: bool) -> int:
+def purge_past_events(conn, http: httpx.Client, target: IngestTarget, dry_run: bool) -> int:
     """Borra eventos cuya última fecha (Fecha_Fin o Fecha_Inicio) < hoy.
-    Borra también los archivos de imagen en disco. CASCADE limpia tablas hijas."""
+    Borra también sus imágenes (disco local o servidor remoto). CASCADE limpia tablas hijas."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT em.ID_Unico_Evento
@@ -495,10 +626,15 @@ def purge_past_events(conn, dry_run: bool) -> int:
         return len(ids)
 
     for eid in ids:
-        # Borrar carpeta de imágenes en disco
-        event_dir = IMAGES_DIR / eid
-        if event_dir.exists():
-            shutil.rmtree(event_dir, ignore_errors=True)
+        if target.store_images_locally:
+            event_dir = IMAGES_DIR / eid
+            if event_dir.exists():
+                shutil.rmtree(event_dir, ignore_errors=True)
+        else:
+            try:
+                _delete_event_images_remote(http, target, eid)
+            except httpx.HTTPError as exc:
+                log.warning(f"  No se pudieron borrar imágenes remotas de {eid}: {exc}")
         with conn.cursor() as cur:
             cur.execute("DELETE FROM EVENTOS_MASTER WHERE ID_Unico_Evento=%s", (eid,))
     conn.commit()
@@ -559,6 +695,12 @@ def load_existing_events(conn) -> dict:
 
 def make_http_client():
     return httpx.Client(timeout=HTTP_TIMEOUT, headers={"User-Agent": HTTP_USER_AGENT})
+
+
+def make_openai_client():
+    log.info(f"OpenAI: modelo={LLM_MODEL}, timeout={OPENAI_TIMEOUT}s, "
+             f"max_retries={OPENAI_MAX_RETRIES}")
+    return OpenAI(timeout=OPENAI_TIMEOUT, max_retries=OPENAI_MAX_RETRIES)
 
 
 def download_html(url: str, client: httpx.Client) -> str:
@@ -809,15 +951,24 @@ CARTEL_SCHEMA = {
 # LLM: LLAMADAS
 # ============================================================================
 
-def llm_json(oai, pob, system, user, schema, op="otros"):
-    resp = oai.chat.completions.create(
-        model=LLM_MODEL,
-        messages=[{"role": "system", "content": system},
-                  {"role": "user", "content": user}],
-        response_format={"type": "json_schema", "json_schema": schema},
-        temperature=0,
-    )
+def llm_json(oai, pob, system, user, schema, op="otros", context: str = ""):
+    ctx = f" — {context}" if context else ""
+    log.info(f"    LLM [{op}]{ctx}: enviando ~{len(user):,} chars...")
+    t0 = time.monotonic()
+    try:
+        resp = oai.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            response_format={"type": "json_schema", "json_schema": schema},
+            temperature=0,
+        )
+    except Exception as exc:
+        log.error(f"    LLM [{op}] falló tras {time.monotonic() - t0:.1f}s: {exc}")
+        raise
+    elapsed = time.monotonic() - t0
     COST.add_llm(pob, resp, op)
+    log.info(f"    LLM [{op}] OK en {elapsed:.1f}s")
     return json.loads(resp.choices[0].message.content)
 
 
@@ -838,7 +989,8 @@ def extract_listing(oai, pob, html_clean, listado_url):
         "(5) Solo eventos futuros o en curso."
     )
     user = f"URL listado: {listado_url}\n\nHTML:\n{html_clean}"
-    data = llm_json(oai, pob, system, user, LISTING_SCHEMA, op="listado")
+    data = llm_json(oai, pob, system, user, LISTING_SCHEMA,
+                    op="listado", context=listado_url)
     items = data.get("eventos", [])
     for it in items:
         if it.get("url_detalle"):
@@ -853,7 +1005,7 @@ def extract_detail(oai, pob, html_clean, url):
               "campos pedidos. No inventes datos (null si no aparecen). URLs absolutas. "
               "Descripción: solo el texto del evento.")
     user = f"URL: {url}\n\nHTML:\n{html_clean}"
-    data = llm_json(oai, pob, system, user, DETAIL_SCHEMA, op="detalle")
+    data = llm_json(oai, pob, system, user, DETAIL_SCHEMA, op="detalle", context=url)
     imgs = [urljoin(url, u) for u in (data.get("imagenes_urls") or []) if u]
     data["imagenes_urls"] = imgs
     if data.get("link_inscripcion"):
@@ -908,6 +1060,8 @@ def extract_cartel(oai, pob, http, image_url: str, today_iso: str) -> Optional[d
         "sesiones, devuélvelas en horarios_discretos."
     )
 
+    log.info(f"    LLM [cartel] — {image_url}: leyendo cartel...")
+    t0 = time.monotonic()
     try:
         resp = oai.chat.completions.create(
             model=LLM_MODEL,
@@ -922,13 +1076,14 @@ def extract_cartel(oai, pob, http, image_url: str, today_iso: str) -> Optional[d
             temperature=0,
         )
         COST.add_llm(pob, resp, op="cartel")
+        log.info(f"    LLM [cartel] OK en {time.monotonic() - t0:.1f}s")
         data = json.loads(resp.choices[0].message.content)
         if not data.get("tiene_texto_util"):
             log.info(f"    Cartel-OCR: imagen sin texto útil, descartada")
             return None
         return data
     except Exception as e:
-        log.warning(f"    Cartel-OCR falló: {e}")
+        log.warning(f"    Cartel-OCR falló tras {time.monotonic() - t0:.1f}s: {e}")
         return None
 
 
@@ -971,7 +1126,8 @@ def enrich(oai, pob, ev: MergedEvent):
             f"DESCRIPCIÓN (ca):\n{ev.descripcion_larga}\n"
             f"LUGAR (crudo): {ev.lugar}\n"
             f"ORGANIZADOR: {ev.organizador_nombre}")
-    d = llm_json(oai, pob, ENRICH_SYSTEM, user, ENRICHMENT_SCHEMA, op="enriquecimiento")
+    d = llm_json(oai, pob, ENRICH_SYSTEM, user, ENRICHMENT_SCHEMA,
+                 op="enriquecimiento", context=ev.titulo[:60])
     ev.titulo_es = d["titulo_es"]
     ev.desc_larga_es = d["desc_larga_es"]
     ev.tags_ca = d["tags_ca"]
@@ -1009,7 +1165,9 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
         log.error(f"    No se pudo descargar el listado: {e}")
         return []
 
-    items = extract_listing(oai, pob, clean_html(listing_html), listado_url)
+    html_clean = clean_html(listing_html)
+    log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars HTML limpio)...")
+    items = extract_listing(oai, pob, html_clean, listado_url)
     log.info(f"    {len(items)} eventos en el listado")
 
     candidates = []
@@ -1056,6 +1214,7 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
                 detail = None
             else:
                 try:
+                    log.info(f"    Detalle [{details_done + 1}]: {titulo[:60]}")
                     detail = extract_detail(oai, pob, clean_html(download_html(url_det, http)), url_det)
                     detail_cache[url_det] = detail
                     details_done += 1
@@ -1309,13 +1468,27 @@ def determinar_orientacion(w, h):
     return "horizontal" if ratio > RATIO_HORIZONTAL_MIN else "vertical" if ratio < RATIO_VERTICAL_MAX else "cuadrada"
 
 
-def descargar_imagenes(conn, http, ev: MergedEvent, pob):
+def _imagen_ya_disponible(target: IngestTarget, http: httpx.Client, eid: str,
+                          fname: str, storage_url: str) -> bool:
+    if target.store_images_locally:
+        return (IMAGES_DIR / eid / fname).is_file()
+    return _remote_image_exists(http, target, storage_url)
+
+
+def descargar_imagenes(conn, http, ev: MergedEvent, pob, target: IngestTarget):
     for orden, url in enumerate(ev.imagenes):
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM BINARIOS_STORAGE WHERE ID_Unico_Evento=%s AND URL_Original_Externa=%s",
-                        (ev.id_unico, url))
-            if cur.fetchone():
-                continue
+            cur.execute("""
+                SELECT Nombre_Archivo, URL_Almacenamiento_Nube
+                FROM BINARIOS_STORAGE
+                WHERE ID_Unico_Evento=%s AND URL_Original_Externa=%s
+            """, (ev.id_unico, url))
+            existing = cur.fetchone()
+        if existing and _imagen_ya_disponible(
+            target, http, ev.id_unico,
+            existing["Nombre_Archivo"], existing["URL_Almacenamiento_Nube"],
+        ):
+            continue
         try:
             r = http.get(url, follow_redirects=True); r.raise_for_status()
             content = r.content
@@ -1328,10 +1501,15 @@ def descargar_imagenes(conn, http, ev: MergedEvent, pob):
             ext = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}.get(fmt, "jpg")
             tipo = {"JPEG": "JPG", "PNG": "PNG", "WEBP": "WEBP"}.get(fmt, "JPG")
             checksum = hashlib.sha256(content).hexdigest()
-            event_dir = IMAGES_DIR / ev.id_unico
-            event_dir.mkdir(parents=True, exist_ok=True)
-            fname = f"{orden:02d}_{checksum[:12]}.{ext}"
-            (event_dir / fname).write_bytes(content)
+            fname = existing["Nombre_Archivo"] if existing else f"{orden:02d}_{checksum[:12]}.{ext}"
+            if target.store_images_locally:
+                event_dir = IMAGES_DIR / ev.id_unico
+                event_dir.mkdir(parents=True, exist_ok=True)
+                (event_dir / fname).write_bytes(content)
+            else:
+                _upload_image_remote(http, target, ev.id_unico, fname, content)
+            if existing:
+                continue
             local_url = f"/static/images/{ev.id_unico}/{fname}"
             with conn.cursor() as cur:
                 cur.execute("""INSERT INTO BINARIOS_STORAGE
@@ -1345,8 +1523,46 @@ def descargar_imagenes(conn, http, ev: MergedEvent, pob):
             log.error(f"    Imagen fallida {url}: {e}")
 
 
+def sync_remote_binarios(conn, http: httpx.Client, target: IngestTarget, dry_run: bool) -> None:
+    """Con --target railway: asegura que cada BINARIOS_STORAGE tenga su fichero en el servidor.
+
+    Cubre eventos omitidos por ingesta incremental y binarios perdidos tras un redeploy."""
+    if target.store_images_locally or dry_run:
+        return
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT ID_Unico_Evento, Nombre_Archivo, URL_Almacenamiento_Nube, URL_Original_Externa
+            FROM BINARIOS_STORAGE
+            WHERE URL_Original_Externa IS NOT NULL AND URL_Original_Externa != ''
+        """)
+        rows = cur.fetchall()
+    if not rows:
+        return
+    ok, subidas, fallidas = 0, 0, 0
+    log.info(f"Sincronizando {len(rows)} imágenes con Railway ({target.api_base_url})...")
+    for row in rows:
+        eid = row["ID_Unico_Evento"]
+        fname = row["Nombre_Archivo"]
+        storage_url = row["URL_Almacenamiento_Nube"]
+        if _remote_image_exists(http, target, storage_url):
+            ok += 1
+            continue
+        ext_url = row["URL_Original_Externa"]
+        try:
+            r = http.get(ext_url, follow_redirects=True, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            if not (100 < len(r.content) <= MAX_IMAGE_SIZE_BYTES):
+                raise ValueError(f"tamaño sospechoso ({len(r.content)} bytes)")
+            _upload_image_remote(http, target, eid, fname, r.content)
+            subidas += 1
+        except Exception as exc:
+            fallidas += 1
+            log.error(f"    Sync fallida {eid[:12]}…/{fname}: {exc}")
+    log.info(f"Sincronización imágenes Railway: {ok} ya OK, {subidas} subidas, {fallidas} fallidas")
+
+
 def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
-                  fuente_cache, dry_run):
+                  fuente_cache, dry_run, target: IngestTarget):
     coords = coords_cache.get(ev.poblacion, {"lat": 41.6, "lng": 2.7})
     id_ciudad = ensure_ciudad(conn, oai, ev.poblacion, coords_cache)
     coords = coords_cache.get(ev.poblacion, coords)
@@ -1420,7 +1636,7 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
                 (ev.id_unico, id_fuente, url_origen, 1 if i == 0 else 0))
 
     # IMÁGENES
-    descargar_imagenes(conn, http, ev, ev.poblacion)
+    descargar_imagenes(conn, http, ev, ev.poblacion, target)
     with conn.cursor() as cur:
         cur.execute("""SELECT URL_Almacenamiento_Nube FROM BINARIOS_STORAGE
                        WHERE ID_Unico_Evento=%s AND Es_Principal=1 LIMIT 1""", (ev.id_unico,))
@@ -1434,16 +1650,36 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
 # PIPELINE PRINCIPAL
 # ============================================================================
 
-def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False):
+def run_sync_images_only(target_name: str = "railway", api_base_url: Optional[str] = None,
+                         dry_run: bool = False) -> None:
+    """Re-descarga desde URL_Original_Externa y sube a Railway los binarios que falten."""
+    if target_name != "railway":
+        sys.exit("--sync-images-only requiere --target railway")
+    ingest_target = resolve_ingest_target(target_name, api_base_url)
+    http = make_http_client()
+    conn = get_connection(ingest_target)
+    try:
+        log.info(f"Destino: railway -> {ingest_target.db_host}:{ingest_target.db_port}/{ingest_target.db_name}")
+        log.info(f"API imágenes: {ingest_target.api_base_url}")
+        verify_railway_upload_access(http, ingest_target)
+        sync_remote_binarios(conn, http, ingest_target, dry_run)
+    finally:
+        http.close()
+        conn.close()
+
+
+def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False,
+        target_name: str = "local", api_base_url: Optional[str] = None):
     if not os.getenv("OPENAI_API_KEY"):
         sys.exit("Falta OPENAI_API_KEY en .env")
     if not input_path.exists():
         sys.exit(f"JSON de entrada no encontrado: {input_path}")
 
+    ingest_target = resolve_ingest_target(target_name, api_base_url)
     fuentes_config = json.loads(input_path.read_text(encoding="utf-8"))
-    oai = OpenAI()
+    oai = make_openai_client()
     http = make_http_client()
-    conn = get_connection()
+    conn = get_connection(ingest_target)
 
     coords_cache, fuente_cache = {}, {}
 
@@ -1453,9 +1689,16 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False):
             sys.exit("CATEGORIAS vacía. Ejecuta reset_catalogo_categorias.sql primero.")
         log.info(f"Categorías en BD: {len(cat_map)}")
         log.info(f"Umbral de fusión de títulos: {umbral}")
+        log.info(f"Destino: {ingest_target.name} -> {ingest_target.db_host}:{ingest_target.db_port}/{ingest_target.db_name}")
+        if ingest_target.store_images_locally:
+            log.info(f"Imágenes: disco local ({IMAGES_DIR})")
+        else:
+            log.info(f"Imágenes: subida directa a Railway ({ingest_target.api_base_url})")
+            verify_railway_upload_access(http, ingest_target)
+            log.info("API de imágenes: acceso verificado")
 
         # 0. Limpieza inicial: eventos pasados completos + horarios sueltos pasados
-        purge_past_events(conn, dry_run)
+        purge_past_events(conn, http, ingest_target, dry_run)
         purge_past_horarios(conn, dry_run)
 
         # Ingesta incremental: eventos ya en BD para omitir su reproceso.
@@ -1497,7 +1740,8 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False):
                 enrich(oai, pob, ev)
                 if not dry_run:
                     try:
-                        persist_event(conn, oai, http, ev, cat_map, coords_cache, fuente_cache, dry_run)
+                        persist_event(conn, oai, http, ev, cat_map, coords_cache,
+                                      fuente_cache, dry_run, ingest_target)
                         conn.commit()
                         persistidos += 1
                     except Exception as e:
@@ -1508,6 +1752,7 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False):
             COST.add_evento(pob, persistidos)
             log.info(f"  Eventos persistidos en {pob}: {persistidos}")
 
+        sync_remote_binarios(conn, http, ingest_target, dry_run)
         COST.report()
         if dry_run:
             log.info("(dry-run: no se ha tocado la BD ni descargado imágenes)")
@@ -1519,7 +1764,9 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False):
 
 def main():
     ap = argparse.ArgumentParser(description="Pipeline completo de ingesta de eventos (un proceso).")
-    ap.add_argument("--input", required=True, help="JSON de poblaciones/links")
+    ap.add_argument("--input", help="JSON de poblaciones/links (no requerido con --sync-images-only)")
+    ap.add_argument("--sync-images-only", action="store_true",
+                    help="Solo re-descarga y sube a Railway las imágenes que falten en el servidor")
     ap.add_argument("--dry-run", action="store_true", help="No toca BD ni descarga imágenes")
     ap.add_argument("--umbral", type=float, default=SIMILARITY_THRESHOLD,
                     help=(f"Umbral de similitud (0..1) para fusionar eventos de la misma "
@@ -1529,8 +1776,20 @@ def main():
                     help=("Reprocesa TODOS los eventos, incluidos los que ya existen en "
                           "la BD. Por defecto (sin este flag) la ingesta es incremental: "
                           "los eventos ya registrados se omiten para ahorrar coste."))
+    ap.add_argument("--target", choices=("local", "railway"), default="local",
+                    help=("Destino de la ingesta: 'local' usa DB_* (Docker); "
+                          "'railway' usa RAILWAY_DB_* y sube imágenes al servidor API."))
+    ap.add_argument("--api-base-url", default=None,
+                    help=("URL base de la API en producción (solo con --target railway). "
+                          "Por defecto EVENTS_API_BASE_URL o https://eventquery.km0lab.com"))
     args = ap.parse_args()
-    run(Path(args.input), args.dry_run, args.umbral, args.refresh)
+    if args.sync_images_only:
+        run_sync_images_only(args.target, args.api_base_url, args.dry_run)
+        return
+    if not args.input:
+        ap.error("--input es obligatorio salvo con --sync-images-only")
+    run(Path(args.input), args.dry_run, args.umbral, args.refresh,
+        args.target, args.api_base_url)
 
 
 if __name__ == "__main__":

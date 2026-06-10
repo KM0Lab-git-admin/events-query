@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
@@ -79,3 +80,24 @@ async def upload_event_image(
         "path": f"/static/images/{event_id}/{filename}",
         "bytes": len(content),
     }
+
+
+@router.delete("/images/{event_id}")
+async def delete_event_images(
+    event_id: str,
+    x_ingest_secret: str | None = Header(default=None, alias="X-Ingest-Secret"),
+):
+    """Elimina la carpeta static/images/{event_id} del servidor (limpieza de ingesta)."""
+    _verify_secret(x_ingest_secret)
+
+    if not EVENT_ID_RE.match(event_id):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ID de evento inválido")
+
+    dest_dir = STATIC_IMAGES_DIR / event_id
+    removed = False
+    if dest_dir.is_dir():
+        shutil.rmtree(dest_dir)
+        removed = True
+        logger.info("Imágenes de ingesta eliminadas: %s", dest_dir.relative_to(STATIC_IMAGES_DIR.parent))
+
+    return {"ok": True, "event_id": event_id, "removed": removed}

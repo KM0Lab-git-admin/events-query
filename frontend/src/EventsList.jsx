@@ -60,6 +60,8 @@ const TEXTOS_UI = {
     asociacion: 'Asociación',
     placeholderTags: 'Ej: cultura, #gastronomia, yoga...',
     buscar: 'Buscar en eventos...',
+    filtros: 'Filtros',
+    ocultarFiltros: 'Ocultar filtros',
     error: 'Error',
     apiNoResponde:
       'No hay respuesta de la API (¿arrancada en http://localhost:8000?). Revisa uvicorn y MySQL.'
@@ -110,6 +112,8 @@ const TEXTOS_UI = {
     asociacion: 'Associació',
     placeholderTags: 'Ex: cultura, #gastronomia, ioga...',
     buscar: 'Cercar en esdeveniments...',
+    filtros: 'Filtres',
+    ocultarFiltros: 'Amagar filtres',
     error: 'Error',
     apiNoResponde:
       'Sense resposta de l\'API (¿arrancada a http://localhost:8000?). Revisa uvicorn i MySQL.'
@@ -155,6 +159,7 @@ function EventsList() {
   
   // Búsqueda de texto libre (client-side)
   const [busquedaTexto, setBusquedaTexto] = useState('')
+  const [filtrosAbiertos, setFiltrosAbiertos] = useState(false)
 
   // Paginación
   const [offset, setOffset] = useState(0)
@@ -451,18 +456,28 @@ function EventsList() {
       <div className="events-sticky-header">
         <div className="events-header-row">
           <h2>{t.tituloSeccion}</h2>
-          <button
-            type="button"
-            className="btn-idioma"
-            onClick={() => setIdioma(prev => prev === 'es' ? 'ca' : 'es')}
-            title={idioma === 'es' ? t.cambiarIdioma : TEXTOS_UI.es.cambiarIdioma}
-          >
-            {idioma === 'es' ? 'Català' : 'Castellano'}
-          </button>
+          <div className="events-header-actions">
+            <button
+              type="button"
+              className={`btn-filtros-toggle ${filtrosAbiertos ? 'btn-filtros-toggle-active' : ''}`}
+              onClick={() => setFiltrosAbiertos(prev => !prev)}
+            >
+              {filtrosAbiertos ? t.ocultarFiltros : t.filtros}
+            </button>
+            <button
+              type="button"
+              className="btn-idioma"
+              onClick={() => setIdioma(prev => prev === 'es' ? 'ca' : 'es')}
+              title={idioma === 'es' ? t.cambiarIdioma : TEXTOS_UI.es.cambiarIdioma}
+            >
+              {idioma === 'es' ? 'Català' : 'Castellano'}
+            </button>
+          </div>
         </div>
         
-        {/* Panel de filtros */}
-        <div className="filters-panel">
+        {/* Panel de filtros (colapsable) */}
+        {filtrosAbiertos && (
+        <div className="filters-panel filters-panel-compact">
           <div className="filters-row">
             {/* Población */}
             <div className="filter-group">
@@ -577,6 +592,7 @@ function EventsList() {
             </div>
           </div>
         </div>
+        )}
 
         {/* Input de búsqueda de texto libre */}
         <div className="search-text-wrapper">
@@ -610,8 +626,8 @@ function EventsList() {
           )}
         </div>
       </div>
-      
-      {/* Lista de eventos (zona scrollable) */}
+
+      <div className="events-scroll-area">
       {error && <div className="error-message">{t.error}: {error}</div>}
       
       {loading ? (
@@ -795,8 +811,7 @@ function EventsList() {
           )}
         </div>
       )}
-      
-      {/* Paginación */}
+
       {total > limit && (
         <div className="pagination">
           <button 
@@ -818,6 +833,7 @@ function EventsList() {
           </button>
         </div>
       )}
+      </div>
     </div>
   )
 }
