@@ -63,6 +63,8 @@ const TEXTOS_UI = {
     filtros: 'Filtros',
     ocultarFiltros: 'Ocultar filtros',
     error: 'Error',
+    programa: 'Programa del evento',
+    actividades: 'actividades',
     apiNoResponde:
       'No hay respuesta de la API (¿arrancada en http://localhost:8000?). Revisa uvicorn y MySQL.'
   },
@@ -115,6 +117,8 @@ const TEXTOS_UI = {
     filtros: 'Filtres',
     ocultarFiltros: 'Amagar filtres',
     error: 'Error',
+    programa: 'Programa de l\'esdeveniment',
+    actividades: 'activitats',
     apiNoResponde:
       'Sense resposta de l\'API (¿arrancada a http://localhost:8000?). Revisa uvicorn i MySQL.'
   }
@@ -441,7 +445,13 @@ function EventsList() {
   /** Contenido del evento en el idioma seleccionado (con fallback al otro) */
   const eventoTexto = (evento, campo) => {
     if (campo === 'titulo') return idioma === 'ca' ? (evento.titulo_cat || evento.titulo_es) : evento.titulo_es
-    if (campo === 'descripcion') return idioma === 'ca' ? (evento.descripcion_cat || evento.descripcion_es) : evento.descripcion_es
+    // Descripción de tarjeta: el resumen corto (LLM) si existe; si no, la larga
+    if (campo === 'descripcion') {
+      if (idioma === 'ca') {
+        return evento.descripcion_corta_cat || evento.descripcion_cat || evento.descripcion_corta_es || evento.descripcion_es
+      }
+      return evento.descripcion_corta_es || evento.descripcion_es
+    }
     if (campo === 'tags') return idioma === 'ca' ? (evento.tags_cat?.length ? evento.tags_cat : evento.tags_es) : (evento.tags_es || [])
     if (campo === 'categorias') {
       const arr = idioma === 'ca' ? (evento.categorias_cat || evento.categorias_es) : (evento.categorias_es || evento.categorias_slugs)
@@ -691,7 +701,29 @@ function EventsList() {
                   <span className="field-label">{t.descripcion}</span>
                   <p>{eventoTexto(evento, 'descripcion') || '—'}</p>
                 </div>
-                
+
+                {/* Programa: actividades de la familia (festival/fira/ciclo) */}
+                {evento.es_familia && Array.isArray(evento.actividades) && evento.actividades.length > 0 && (
+                  <div className="event-card-block event-card-actividades">
+                    <span className="field-label">
+                      {t.programa} · {evento.actividades.length} {t.actividades}
+                    </span>
+                    <div className="event-card-details">
+                      {evento.actividades.map((act) => (
+                        <div key={act.id} className="detail-item actividad-item">
+                          <span className="detail-icon">🎪</span>
+                          <span>
+                            <strong>{idioma === 'ca' ? (act.titulo_cat || act.titulo_es) : act.titulo_es}</strong>
+                            {act.fecha_inicio ? ` · ${formatearFecha(act.fecha_inicio)}` : ''}
+                            {act.hora_inicio ? ` · ${formatearHora(act.hora_inicio)}` : ''}
+                            {act.lugar ? ` · ${act.lugar}` : ''}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Ubicación: CP, población, lugar, dirección */}
                 <div className="event-card-block">
                   <span className="field-label">{t.ubicacion}</span>

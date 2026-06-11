@@ -333,10 +333,15 @@ async def list_events_with_filters(
         query = f"""
         SELECT
             em.ID_Unico_Evento as id,
+            COALESCE(em.ID_Familia, em.ID_Unico_Evento) as familia,
             em.Titulo_ES as titulo_es,
             em.Titulo_CAT as titulo_cat,
             em.Desc_Larga_ES as descripcion_es,
             em.Desc_Larga_CAT as descripcion_cat,
+            COALESCE(NULLIF(em.Desc_Corta_ES, ''),
+                     LEFT(COALESCE(em.Desc_Larga_ES, ''), 400)) as descripcion_corta_es,
+            COALESCE(NULLIF(em.Desc_Corta_CAT, ''),
+                     LEFT(COALESCE(em.Desc_Larga_CAT, ''), 400)) as descripcion_corta_cat,
             em.CP_Evento as cp,
             em.Poblacion_Nombre as poblacion,
             em.Lugar_Nombre as lugar,
@@ -398,8 +403,9 @@ async def list_events_with_filters(
         FROM EVENTOS_MASTER em
         WHERE {where_sql}
         ORDER BY fecha_inicio ASC, hora_inicio ASC, em.Titulo_ES ASC
-        LIMIT {limit} OFFSET {offset}
         """
+        # Nota: sin LIMIT en SQL — la agrupación por familia y la paginación se
+        # hacen en Python sobre las tarjetas resultantes (volumen actual bajo).
 
         result = await db_service.execute_query(query, tuple(where_params))
         
@@ -446,10 +452,13 @@ async def list_events_with_filters(
 
             evento = {
                 "id": row["id"],
+                "familia": row["familia"],
                 "titulo_es": row["titulo_es"],
                 "titulo_cat": row["titulo_cat"],
                 "descripcion_es": row["descripcion_es"],
                 "descripcion_cat": row["descripcion_cat"],
+                "descripcion_corta_es": row["descripcion_corta_es"],
+                "descripcion_corta_cat": row["descripcion_corta_cat"],
                 "cp": row["cp"],
                 "poblacion": row["poblacion"],
                 "lugar": row["lugar"],
@@ -475,32 +484,69 @@ async def list_events_with_filters(
                 "categorias_cat": row["categorias_cat"].split(",") if row["categorias_cat"] else []
             }
             eventos.append(evento)
-        
-        # Contar total (sin paginación)
-        count_query = f"""
-        SELECT COUNT(*) as total
-        FROM EVENTOS_MASTER em
-        WHERE {where_sql}
-        """
-        count_result = await db_service.execute_query(count_query, tuple(where_params))
-        total = count_result[0]["total"] if count_result else 0
+
+        # AGRUPACIÓN POR FAMILIA: los eventos que cuelgan de un evento paraguas
+        # (festival, fira, ciclo) comparten ID_Familia. Se devuelve UNA tarjeta
+        # por familia: la cabeza (rango de fechas más amplio; empate ->
+        # descripción más larga) con sus 'actividades' anidadas.
+        def _span_dias(e: Dict[str, Any]) -> int:
+            fechas = [h.get("fecha_inicio") for h in e.get("horarios", []) if h.get("fecha_inicio")]
+            fines = [h.get("fecha_fin") or h.get("fecha_inicio")
+                     for h in e.get("horarios", []) if h.get("fecha_inicio")]
+            if not fechas:
+                return 0
+            try:
+                d0 = date.fromisoformat(min(fechas))
+                d1 = date.fromisoformat(max(f for f in fines if f))
+                return (d1 - d0).days
+            except (ValueError, TypeError):
+                return 0
+
+        familias: Dict[str, List[Dict[str, Any]]] = {}
+        orden_familias: List[str] = []
+        for e in eventos:
+            key = e["familia"]
+            if key not in familias:
+                familias[key] = []
+                orden_familias.append(key)
+            familias[key].append(e)
+
+        tarjetas: List[Dict[str, Any]] = []
+        for key in orden_familias:
+            miembros = familias[key]
+            cabeza = max(miembros,
+                         key=lambda e: (_span_dias(e),
+                                        len(e.get("descripcion_cat") or "")))
+            actividades = [e for e in miembros if e["id"] != cabeza["id"]]
+            actividades.sort(key=lambda e: (e.get("fecha_inicio") or "",
+                                            e.get("hora_inicio") or ""))
+            cabeza["es_familia"] = bool(actividades)
+            cabeza["actividades"] = actividades
+            tarjetas.append(cabeza)
+
+        total = len(tarjetas)
+        pagina = tarjetas[offset:offset + limit]
 
         try:
             async with db_service.get_connection() as conn:
-                ids_ev = [e["id"] for e in eventos if e.get("id")]
+                # imágenes de las cabezas de la página y de sus actividades
+                visibles = list(pagina)
+                for c in pagina:
+                    visibles.extend(c.get("actividades", []))
+                ids_ev = [e["id"] for e in visibles if e.get("id")]
                 img_map = await fetch_imagenes_por_eventos(conn, ids_ev) if ids_ev else {}
-                merge_imagenes_en_eventos(eventos, img_map)
+                merge_imagenes_en_eventos(visibles, img_map)
         except Exception as img_err:
             logger.warning("BINARIOS_STORAGE no disponible o error al cargar imágenes: %s", img_err)
-            for e in eventos:
+            for e in pagina:
                 e.setdefault("imagenes", [])
 
         return {
-            "eventos": eventos,
+            "eventos": pagina,
             "total": total,
             "limit": limit,
             "offset": offset,
-            "has_more": offset + len(eventos) < total,
+            "has_more": offset + len(pagina) < total,
             "filtros_aplicados": {
                 "poblacion": poblacion,
                 "categoria": categoria,
