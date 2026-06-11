@@ -165,18 +165,17 @@ async def list_events(
 
         where_clause = " AND ".join(where_clauses)
 
-        count_query = f"""
-        SELECT COUNT(DISTINCT em.ID_Unico_Evento) AS total
-        FROM EVENTOS_MASTER em
-        LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
-        LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
-        LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
-        WHERE {where_clause}
-        """
-
+        # AGRUPACIÓN POR FAMILIA: los eventos que cuelgan de un evento paraguas
+        # (festival, fira, ciclo) comparten EVENTOS_MASTER.ID_Familia. La lista
+        # devuelve UNA tarjeta por familia: la cabeza (el miembro con el rango
+        # de fechas más amplio) con sus 'actividades' anidadas. Los eventos sin
+        # familia son su propia tarjeta. La agrupación y paginación se hacen en
+        # Python: el volumen actual (cientos de filas) lo permite de sobra; si
+        # crece a miles, mover la agrupación a SQL con window functions.
         data_query = f"""
         SELECT
             em.ID_Unico_Evento AS id,
+            COALESCE(em.ID_Familia, em.ID_Unico_Evento) AS familia,
             em.Titulo_ES AS titulo_es,
             em.Titulo_CAT AS titulo_cat,
             LEFT(COALESCE(em.Desc_Larga_ES, ''), 400) AS descripcion_corta_es,
@@ -188,6 +187,7 @@ async def list_events(
             em.Precio_Euros AS precio,
             em.Imagen_Principal_URL AS imagen_url,
             MIN(eh.Fecha_Inicio) AS fecha_inicio,
+            MAX(COALESCE(eh.Fecha_Fin, eh.Fecha_Inicio)) AS fecha_fin,
             MIN(eh.Hora_Inicio) AS hora_inicio,
             GROUP_CONCAT(DISTINCT c.Slug ORDER BY c.Slug) AS categorias_slugs,
             GROUP_CONCAT(DISTINCT c.Nombre_ES ORDER BY c.Slug) AS categorias_es
@@ -198,51 +198,81 @@ async def list_events(
         WHERE {where_clause}
         GROUP BY em.ID_Unico_Evento
         ORDER BY fecha_inicio ASC, em.Titulo_ES ASC
-        LIMIT %s OFFSET %s
         """
+
+        def _row_to_event(row: Dict[str, Any]) -> Dict[str, Any]:
+            slug_blob = row.get("categorias_slugs") or ""
+            cats = [s for s in slug_blob.split(",") if s] if slug_blob else []
+            nombre_blob = row.get("categorias_es") or ""
+            cats_nom = [s for s in nombre_blob.split(",") if s] if nombre_blob else []
+            return {
+                "id": row["id"],
+                "titulo_es": row["titulo_es"],
+                "titulo_cat": row["titulo_cat"],
+                "descripcion_corta_es": row["descripcion_corta_es"],
+                "descripcion_corta_cat": row["descripcion_corta_cat"],
+                "cp": row["cp"],
+                "poblacion": row["poblacion"],
+                "lugar": row["lugar"],
+                "es_gratuito": bool(row["es_gratuito"]),
+                "precio": float(row["precio"]) if row.get("precio") is not None else None,
+                "imagen_url": row.get("imagen_url"),
+                "fecha_inicio": str(row["fecha_inicio"]) if row.get("fecha_inicio") else None,
+                "fecha_fin": str(row["fecha_fin"]) if row.get("fecha_fin") else None,
+                "hora_inicio": str(row["hora_inicio"]) if row.get("hora_inicio") else None,
+                "categorias": cats,
+                "categorias_nombres": cats_nom,
+            }
+
+        def _span_dias(row: Dict[str, Any]) -> int:
+            if row.get("fecha_inicio") and row.get("fecha_fin"):
+                try:
+                    return (row["fecha_fin"] - row["fecha_inicio"]).days
+                except TypeError:
+                    return 0
+            return 0
 
         async with db_service.get_connection() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
-                await cursor.execute(count_query, params)
-                total_row = await cursor.fetchone()
-                total = int(total_row["total"]) if total_row and total_row.get("total") is not None else 0
-
-                data_params = params + [page_size, offset]
-                await cursor.execute(data_query, data_params)
+                await cursor.execute(data_query, params)
                 rows = await cursor.fetchall() or []
 
-                eventos = []
+                # Agrupar por familia conservando el orden por fecha
+                familias: Dict[str, List[Dict[str, Any]]] = {}
+                orden_familias: List[str] = []
                 for row in rows:
-                    slug_blob = row.get("categorias_slugs") or ""
-                    cats = [s for s in slug_blob.split(",") if s] if slug_blob else []
-                    nombre_blob = row.get("categorias_es") or ""
-                    cats_nom = [s for s in nombre_blob.split(",") if s] if nombre_blob else []
-                    eventos.append(
-                        {
-                            "id": row["id"],
-                            "titulo_es": row["titulo_es"],
-                            "titulo_cat": row["titulo_cat"],
-                            "descripcion_corta_es": row["descripcion_corta_es"],
-                            "descripcion_corta_cat": row["descripcion_corta_cat"],
-                            "cp": row["cp"],
-                            "poblacion": row["poblacion"],
-                            "lugar": row["lugar"],
-                            "es_gratuito": bool(row["es_gratuito"]),
-                            "precio": float(row["precio"]) if row.get("precio") is not None else None,
-                            "imagen_url": row.get("imagen_url"),
-                            "fecha_inicio": str(row["fecha_inicio"]) if row.get("fecha_inicio") else None,
-                            "hora_inicio": str(row["hora_inicio"]) if row.get("hora_inicio") else None,
-                            "categorias": cats,
-                            "categorias_nombres": cats_nom,
-                        }
-                    )
+                    key = row["familia"]
+                    if key not in familias:
+                        familias[key] = []
+                        orden_familias.append(key)
+                    familias[key].append(row)
 
-                await _attach_imagenes(conn, eventos)
+                tarjetas = []
+                for key in orden_familias:
+                    miembros = familias[key]
+                    # cabeza = rango de fechas más amplio; empate -> descripción más larga
+                    cabeza_row = max(
+                        miembros,
+                        key=lambda r: (_span_dias(r),
+                                       len(r.get("descripcion_corta_cat") or "")),
+                    )
+                    cabeza = _row_to_event(cabeza_row)
+                    actividades = [
+                        _row_to_event(r) for r in miembros if r["id"] != cabeza_row["id"]
+                    ]
+                    cabeza["es_familia"] = bool(actividades)
+                    cabeza["actividades"] = actividades
+                    tarjetas.append(cabeza)
+
+                total = len(tarjetas)
+                pagina = tarjetas[offset:offset + page_size]
+
+                await _attach_imagenes(conn, pagina)
 
                 total_pages = (total + page_size - 1) // page_size if page_size else 0
 
                 return {
-                    "data": eventos,
+                    "data": pagina,
                     "total": total,
                     "page": page,
                     "page_size": page_size,

@@ -616,6 +616,25 @@ class MergedEvent:
     categoria_principal: str = ""
     recinto_canonico: str = ""
     recinto_tipo: str = "OTRO"
+    evento_paraguas: str = ""   # nombre canónico del festival/ciclo al que pertenece
+
+
+def familia_id(poblacion: str, paraguas: str) -> str:
+    """ID determinista de familia de eventos, derivado del nombre canónico del
+    evento paraguas (festival/fira/ciclo). Estable entre runs y fusiones."""
+    basis = f"familia|{strip_accents(poblacion.lower()).strip()}|{normalize_title(paraguas)}"
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
+def deducir_paraguas_por_titulo(titulo: str) -> str:
+    """Heurística determinista de respaldo: títulos tipo
+    'Festival Libèl·lula: Tallers circ' -> 'Festival Libèl·lula'.
+    Solo si el prefijo parece un nombre de evento (>= 2 palabras)."""
+    if ":" in titulo:
+        prefijo = titulo.split(":", 1)[0].strip()
+        if len(prefijo.split()) >= 2 and len(prefijo) >= 8:
+            return prefijo
+    return ""
 
 
 @dataclass
@@ -1103,10 +1122,19 @@ ENRICHMENT_SCHEMA = {
             },
             "recinto_tipo": {"type": "string", "enum": RECINTO_TIPOS,
                              "description": "Tipo de recinto. OTRO si no encaja en biblioteca/centro cultural/teatro/parque."},
+            "evento_paraguas": {
+                "type": ["string", "null"],
+                "description": ("Si el evento FORMA PARTE de un festival, fira, ciclo o "
+                                "programa mayor, el NOMBRE CANÓNICO de ese evento paraguas, "
+                                "limpio y corto (ej: para 'Festival Libèl·lula: taller de "
+                                "xapes' -> 'Festival Libèl·lula'; para una nota del "
+                                "festival entero -> 'Festival Libèl·lula' también). "
+                                "null si es un evento independiente que no cuelga de nada."),
+            },
         },
         "required": ["titulo_es", "desc_larga_es", "tags_ca", "tags_es",
                      "categorias_codigos", "categoria_principal",
-                     "recinto_canonico", "recinto_tipo"],
+                     "recinto_canonico", "recinto_tipo", "evento_paraguas"],
         "additionalProperties": False,
     },
 }
@@ -1507,6 +1535,9 @@ def enrich(oai, pob, ev: MergedEvent):
         ev.categorias.insert(0, ev.categoria_principal)
     ev.recinto_canonico = (d.get("recinto_canonico") or "").strip()
     ev.recinto_tipo = d.get("recinto_tipo") or "OTRO"
+    # Evento paraguas (festival/ciclo): LLM primero, heurística "X: Y" de respaldo
+    ev.evento_paraguas = (d.get("evento_paraguas") or "").strip() \
+        or deducir_paraguas_por_titulo(ev.titulo)
 
 
 # ============================================================================
@@ -1972,22 +2003,28 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
     titulo_es = ev.titulo_es or ev.titulo
     img_principal = None  # se setea tras descargar
 
+    # Familia: si el evento cuelga de un paraguas (festival/ciclo), su familia
+    # es un hash determinista del nombre canónico -> todos los miembros
+    # coinciden aunque sus títulos no se parezcan entre sí.
+    id_fam = familia_id(ev.poblacion, ev.evento_paraguas) if ev.evento_paraguas else None
+
     # EVENTOS_MASTER upsert
     with conn.cursor() as cur:
         cur.execute("""
         INSERT INTO EVENTOS_MASTER (
             ID_Unico_Evento, Metodo_Ingesta, ID_Usuario_Carga, Fuente_ID, Fuente_URL_Original,
             Estado, ID_Ciudad, ID_Recinto, CP_Evento, Poblacion_Nombre, Lugar_Nombre,
-            Direccion_Fisica, Coordenadas_JSON, Organizador_Nombre, Es_Patrocinado, Idioma_Origen,
+            Direccion_Fisica, Coordenadas_JSON, ID_Familia, Organizador_Nombre, Es_Patrocinado, Idioma_Origen,
             Titulo_CAT, Titulo_ES, Desc_Larga_CAT, Desc_Larga_ES, Tags_CAT, Tags_ES,
             Es_Gratuito, Precio_Euros, Requiere_Inscripcion, Link_Entradas_Inscripcion
         ) VALUES (%s,'SCRAPING','ingestion_cli','URL_ESTRUCTURAL',%s,'ACTIVO',%s,%s,%s,%s,%s,
-                  %s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                  %s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON DUPLICATE KEY UPDATE
             Fuente_URL_Original=VALUES(Fuente_URL_Original), ID_Ciudad=VALUES(ID_Ciudad),
             ID_Recinto=VALUES(ID_Recinto), CP_Evento=VALUES(CP_Evento),
             Poblacion_Nombre=VALUES(Poblacion_Nombre), Lugar_Nombre=VALUES(Lugar_Nombre),
             Direccion_Fisica=VALUES(Direccion_Fisica), Coordenadas_JSON=VALUES(Coordenadas_JSON),
+            ID_Familia=COALESCE(VALUES(ID_Familia), ID_Familia),
             Organizador_Nombre=VALUES(Organizador_Nombre), Idioma_Origen=VALUES(Idioma_Origen),
             Titulo_CAT=VALUES(Titulo_CAT), Titulo_ES=VALUES(Titulo_ES),
             Desc_Larga_CAT=VALUES(Desc_Larga_CAT), Desc_Larga_ES=VALUES(Desc_Larga_ES),
@@ -1997,7 +2034,7 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
         """, (
             ev.id_unico, ev.fuentes[0][0] if ev.fuentes else "", id_ciudad, id_recinto,
             ev.cp, ev.poblacion, ev.lugar or "Sin lugar",
-            ev.direccion_fisica or None, json.dumps(coords),
+            ev.direccion_fisica or None, json.dumps(coords), id_fam,
             ev.organizador_nombre or None, "ca",
             ev.titulo, titulo_es, ev.descripcion_larga or "", ev.desc_larga_es or "",
             json.dumps(ev.tags_ca, ensure_ascii=False), json.dumps(ev.tags_es, ensure_ascii=False),

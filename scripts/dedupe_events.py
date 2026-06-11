@@ -65,7 +65,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ingest_all import (  # noqa: E402
     IMAGES_DIR, LLM_MODEL, COST,
     resolve_ingest_target, get_connection, make_http_client, make_openai_client,
-    normalize_place, strip_accents, _delete_event_images_remote,
+    normalize_place, normalize_title, strip_accents, _delete_event_images_remote,
+    familia_id, deducir_paraguas_por_titulo,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -78,6 +79,9 @@ EMBED_PRICE_PER_M = 0.02  # USD / 1M tokens
 
 UMBRAL_DUP = float(os.getenv("DEDUPE_UMBRAL_DUP", "0.90"))
 UMBRAL_GRIS = float(os.getenv("DEDUPE_UMBRAL_GRIS", "0.78"))
+# Pares que YA comparten familia: umbral mucho más bajo para mandarlos al juez
+# (dos piezas del mismo festival pueden parecerse poco y aun así ser MISMO).
+UMBRAL_GRIS_FAMILIA = float(os.getenv("DEDUPE_UMBRAL_GRIS_FAMILIA", "0.60"))
 BLOCK_MARGEN_DIAS = 2     # margen al comparar solape de rangos de fechas
 DESC_CHARS_EMBED = 600    # caracteres de descripción que entran al embedding
 
@@ -124,6 +128,47 @@ def load_eventos(conn) -> list:
             GROUP BY em.ID_Unico_Evento
         """)
         return cur.fetchall()
+
+
+def asignar_familias_por_paraguas(conn, eventos: list, dry_run: bool) -> int:
+    """Pasada determinista PREVIA a los pares: agrupa por 'evento paraguas'.
+
+    Detecta nombres de paraguas en los títulos ('Festival Libèl·lula: X' ->
+    'Festival Libèl·lula') y asigna la misma familia a TODOS los eventos de la
+    ciudad cuyo título contiene ese nombre. Esto cierra familias completas sin
+    depender de que las actividades se parezcan entre sí ('Tast de circ' y
+    'Fem un mural' no se parecen, pero ambas contienen el paraguas).
+
+    El ID de familia es hash(poblacion|paraguas), idéntico al que asigna la
+    ingesta vía LLM (campo evento_paraguas del enriquecimiento)."""
+    # candidatos a paraguas por ciudad
+    paraguas_por_ciudad = {}
+    for e in eventos:
+        p = deducir_paraguas_por_titulo(e["Titulo_CAT"] or "")
+        if p:
+            paraguas_por_ciudad.setdefault(e["ID_Ciudad"], {})[normalize_title(p)] = p
+
+    asignados = 0
+    for e in eventos:
+        if e.get("ID_Familia"):
+            continue
+        titulo_norm = normalize_title(e["Titulo_CAT"] or "")
+        for p_norm, p in paraguas_por_ciudad.get(e["ID_Ciudad"], {}).items():
+            if p_norm and p_norm in titulo_norm:
+                fam = familia_id(e["Poblacion_Nombre"], p)
+                log.info(f"  FAMILIA por paraguas '{p}': {e['Titulo_CAT'][:55]}")
+                if not dry_run:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE EVENTOS_MASTER SET ID_Familia=%s "
+                                    "WHERE ID_Unico_Evento=%s", (fam, e["id"]))
+                e["ID_Familia"] = fam
+                asignados += 1
+                break
+    if asignados and not dry_run:
+        conn.commit()
+    if asignados:
+        log.info(f"Familias por paraguas: {asignados} eventos asignados")
+    return asignados
 
 
 def rangos_solapan(a, b, margen_dias=BLOCK_MARGEN_DIAS) -> bool:
@@ -389,6 +434,9 @@ def run(target_name: str, dry_run: bool, umbral_dup: float, umbral_gris: float):
             log.info("Nada que deduplicar.")
             return
 
+        # Pasada 0: familias por evento paraguas (determinista, sin coste)
+        asignar_familias_por_paraguas(conn, eventos, dry_run)
+
         pares = generar_pares(eventos)
         log.info(f"Pares candidatos (misma ciudad + fechas solapadas ±{BLOCK_MARGEN_DIAS}d): {len(pares)}")
         if not pares:
@@ -402,7 +450,12 @@ def run(target_name: str, dry_run: bool, umbral_dup: float, umbral_gris: float):
             if a["id"] in borrados or b["id"] in borrados:
                 continue
             s = score_par(a, b, emb)
-            if s < umbral_gris:
+            # Dentro de la misma familia el umbral del juez baja: dos piezas del
+            # mismo festival pueden parecerse poco y aun así ser el MISMO evento
+            # (las dos notas del "festival entero" desde webs distintas).
+            misma_familia = bool(a.get("ID_Familia")) and a["ID_Familia"] == b.get("ID_Familia")
+            gris_efectivo = UMBRAL_GRIS_FAMILIA if misma_familia else umbral_gris
+            if s < gris_efectivo:
                 n_distinto += 1
                 continue
 

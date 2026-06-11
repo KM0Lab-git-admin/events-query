@@ -544,6 +544,14 @@ python scripts/dedupe_events.py --target local            # aplica
   (agrupa vía `EVENTOS_MASTER.ID_Familia`, cabeza = el que engloba en fechas) /
   `DISTINTO`.
 - Umbrales ajustables: `--umbral-dup`, `--umbral-gris` (o env `DEDUPE_UMBRAL_*`).
+- **Familias por evento paraguas**: la ingesta detecta en el enriquecimiento si
+  el evento pertenece a un festival/fira/ciclo (`evento_paraguas`) y asigna
+  `ID_Familia = hash(poblacion|paraguas)` ya al persistir. El dedupe añade una
+  pasada determinista por títulos ('Festival X: actividad') y, dentro de una
+  misma familia, baja el umbral del juez (`DEDUPE_UMBRAL_GRIS_FAMILIA`, 0.60)
+  para fusionar las piezas que son "el festival entero" desde varias fuentes.
+- **La API agrupa por familia**: `GET /api/v1/events` devuelve una tarjeta por
+  familia (la cabeza, con `es_familia` y sus `actividades` anidadas).
 - Idempotente; pensado para el cron justo después de `ingest_all.py`.
 - Railway: tras fusiones, ejecutar `ingest_all.py --sync-images-only --target
   railway` para resubir las imágenes traspasadas a su nueva ruta.
