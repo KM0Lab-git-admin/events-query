@@ -113,24 +113,29 @@ JUDGE_SCHEMA = {
 # CARGA Y BLOCKING
 # ============================================================================
 
-def load_eventos(conn) -> list:
+def load_eventos(conn, poblacion: str = None) -> list:
+    sql = """
+        SELECT em.ID_Unico_Evento AS id, em.ID_Ciudad, em.Poblacion_Nombre,
+               em.Titulo_CAT, em.Desc_Larga_CAT, em.Lugar_Nombre,
+               em.Organizador_Nombre, em.ID_Familia, em.Imagen_Principal_URL,
+               MIN(h.Fecha_Inicio) AS fmin,
+               MAX(COALESCE(h.Fecha_Fin, h.Fecha_Inicio)) AS fmax,
+               COUNT(h.ID_Horario) AS n_horarios
+        FROM EVENTOS_MASTER em
+        LEFT JOIN EVENTO_HORARIOS h ON h.ID_Unico_Evento = em.ID_Unico_Evento
+        WHERE em.Estado = 'ACTIVO'
+    """
+    params = []
+    if poblacion:
+        sql += " AND em.Poblacion_Nombre = %s"
+        params.append(poblacion)
+    sql += " GROUP BY em.ID_Unico_Evento"
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT em.ID_Unico_Evento AS id, em.ID_Ciudad, em.Poblacion_Nombre,
-                   em.Titulo_CAT, em.Desc_Larga_CAT, em.Lugar_Nombre,
-                   em.Organizador_Nombre, em.ID_Familia, em.Imagen_Principal_URL,
-                   MIN(h.Fecha_Inicio) AS fmin,
-                   MAX(COALESCE(h.Fecha_Fin, h.Fecha_Inicio)) AS fmax,
-                   COUNT(h.ID_Horario) AS n_horarios
-            FROM EVENTOS_MASTER em
-            LEFT JOIN EVENTO_HORARIOS h ON h.ID_Unico_Evento = em.ID_Unico_Evento
-            WHERE em.Estado = 'ACTIVO'
-            GROUP BY em.ID_Unico_Evento
-        """)
+        cur.execute(sql, params)
         return cur.fetchall()
 
 
-def asignar_familias_por_paraguas(conn, eventos: list, dry_run: bool) -> int:
+def asignar_familias_por_paraguas(destinos: list, eventos: list, dry_run: bool) -> int:
     """Pasada determinista PREVIA a los pares: agrupa por 'evento paraguas'.
 
     Detecta nombres de paraguas en los títulos ('Festival Libèl·lula: X' ->
@@ -158,14 +163,16 @@ def asignar_familias_por_paraguas(conn, eventos: list, dry_run: bool) -> int:
                 fam = familia_id(e["Poblacion_Nombre"], p)
                 log.info(f"  FAMILIA por paraguas '{p}': {e['Titulo_CAT'][:55]}")
                 if not dry_run:
-                    with conn.cursor() as cur:
-                        cur.execute("UPDATE EVENTOS_MASTER SET ID_Familia=%s "
-                                    "WHERE ID_Unico_Evento=%s", (fam, e["id"]))
+                    for d in destinos:
+                        with d["conn"].cursor() as cur:
+                            cur.execute("UPDATE EVENTOS_MASTER SET ID_Familia=%s "
+                                        "WHERE ID_Unico_Evento=%s", (fam, e["id"]))
                 e["ID_Familia"] = fam
                 asignados += 1
                 break
     if asignados and not dry_run:
-        conn.commit()
+        for d in destinos:
+            d["conn"].commit()
     if asignados:
         log.info(f"Familias por paraguas: {asignados} eventos asignados")
     return asignados
@@ -243,7 +250,7 @@ def score_par(a, b, emb) -> float:
 # JUEZ LLM (zona gris)
 # ============================================================================
 
-def juzgar_par(oai, a, b) -> dict:
+def juzgar_par(oai, a, b, cost=None) -> dict:
     system = (
         "Decides la relación entre dos eventos municipales de la misma ciudad. "
         "MISMO: el mismo evento publicado por fuentes distintas, aunque el "
@@ -266,7 +273,7 @@ def juzgar_par(oai, a, b) -> dict:
         response_format={"type": "json_schema", "json_schema": JUDGE_SCHEMA},
         temperature=0,
     )
-    COST.add_llm(a["Poblacion_Nombre"], resp, op="dedupe_juez")
+    (cost or COST).add_llm(a["Poblacion_Nombre"], resp, op="dedupe_juez")
     return json.loads(resp.choices[0].message.content)
 
 
@@ -393,19 +400,20 @@ def elegir_cabeza_familia(a, b):
     return elegir_ganador(a, b)
 
 
-def agrupar_familia(conn, a, b, dry_run) -> str:
-    """Asigna ID_Familia a ambos eventos. Si alguno ya tiene familia, se reusa
-    (las familias se transitivizan solas entre pares)."""
+def agrupar_familia(destinos: list, a, b, dry_run) -> str:
+    """Asigna ID_Familia a ambos eventos en todos los destinos. Si alguno ya
+    tiene familia, se reusa (las familias se transitivizan solas entre pares)."""
     cabeza, miembro = elegir_cabeza_familia(a, b)
     familia = a.get("ID_Familia") or b.get("ID_Familia") or cabeza["id"]
     log.info(f"  FAMILIA [{familia[:12]}…]: '{cabeza['Titulo_CAT'][:45]}' (cabeza) "
              f"+ '{miembro['Titulo_CAT'][:45]}'")
     if not dry_run:
-        with conn.cursor() as cur:
-            cur.execute("UPDATE EVENTOS_MASTER SET ID_Familia=%s "
-                        "WHERE ID_Unico_Evento IN (%s, %s)",
-                        (familia, a["id"], b["id"]))
-        conn.commit()
+        for d in destinos:
+            with d["conn"].cursor() as cur:
+                cur.execute("UPDATE EVENTOS_MASTER SET ID_Familia=%s "
+                            "WHERE ID_Unico_Evento IN (%s, %s)",
+                            (familia, a["id"], b["id"]))
+            d["conn"].commit()
     # reflejar en memoria para la transitividad dentro del mismo run
     a["ID_Familia"] = familia
     b["ID_Familia"] = familia
@@ -416,7 +424,85 @@ def agrupar_familia(conn, a, b, dry_run) -> str:
 # MAIN
 # ============================================================================
 
+def dedupe_poblacion(oai, http, destinos: list, poblacion: str = None,
+                     dry_run: bool = False, umbral_dup: float = None,
+                     umbral_gris: float = None, cost=None) -> tuple:
+    """Núcleo de deduplicación, invocable desde ingest_all tras cada población.
+
+    destinos = [{"conn": ..., "target": IngestTarget}, ...]: el ANÁLISIS
+    (carga de eventos, embeddings, juez LLM) se hace UNA sola vez sobre el
+    primer destino (primario); las ACCIONES (fusión, familia) se aplican en
+    todos. Funciona porque los IDs de evento son hashes deterministas,
+    idénticos en todas las BDs.
+
+    Devuelve (n_fusiones, n_familias)."""
+    umbral_dup = umbral_dup if umbral_dup is not None else UMBRAL_DUP
+    umbral_gris = umbral_gris if umbral_gris is not None else UMBRAL_GRIS
+    primario = destinos[0]["conn"]
+
+    eventos = load_eventos(primario, poblacion)
+    ambito = f" de {poblacion}" if poblacion else ""
+    if len(eventos) < 2:
+        return 0, 0
+    log.info(f"  Dedupe{ambito}: {len(eventos)} eventos activos")
+
+    # Pasada 0: familias por evento paraguas (determinista, sin coste)
+    asignar_familias_por_paraguas(destinos, eventos, dry_run)
+
+    pares = generar_pares(eventos)
+    if not pares:
+        return 0, 0
+    log.info(f"  Pares candidatos (misma ciudad + fechas solapadas "
+             f"±{BLOCK_MARGEN_DIAS}d): {len(pares)}")
+
+    emb, _ = calcular_embeddings(oai, eventos)
+
+    borrados = set()
+    n_fusion = n_familia = n_distinto = n_juez = 0
+    for a, b in sorted(pares, key=lambda p: -score_par(p[0], p[1], emb)):
+        if a["id"] in borrados or b["id"] in borrados:
+            continue
+        s = score_par(a, b, emb)
+        # Dentro de la misma familia el umbral del juez baja: dos piezas del
+        # mismo festival pueden parecerse poco y aun así ser el MISMO evento
+        # (las dos notas del "festival entero" desde webs distintas).
+        misma_familia = bool(a.get("ID_Familia")) and a["ID_Familia"] == b.get("ID_Familia")
+        gris_efectivo = UMBRAL_GRIS_FAMILIA if misma_familia else umbral_gris
+        if s < gris_efectivo:
+            n_distinto += 1
+            continue
+
+        if s >= umbral_dup:
+            relacion = "MISMO"
+            log.info(f"  score {s:.3f} (auto) — '{a['Titulo_CAT'][:40]}' vs "
+                     f"'{b['Titulo_CAT'][:40]}'")
+        else:
+            veredicto = juzgar_par(oai, a, b, cost)
+            n_juez += 1
+            relacion = veredicto["relacion"]
+            log.info(f"  score {s:.3f} (juez: {relacion}) — '{a['Titulo_CAT'][:40]}' vs "
+                     f"'{b['Titulo_CAT'][:40]}' · {veredicto['motivo'][:80]}")
+
+        if relacion == "MISMO":
+            ganador, perdedor = elegir_ganador(a, b)
+            for d in destinos:
+                fusionar_eventos(d["conn"], http, d["target"], ganador,
+                                 perdedor, dry_run)
+            borrados.add(perdedor["id"])
+            n_fusion += 1
+        elif relacion == "MISMA_FAMILIA":
+            agrupar_familia(destinos, a, b, dry_run)
+            n_familia += 1
+        else:
+            n_distinto += 1
+
+    log.info(f"  Dedupe{ambito}: {n_fusion} fusiones · {n_familia} familias · "
+             f"{n_distinto} descartados · {n_juez} juzgados por LLM")
+    return n_fusion, n_familia
+
+
 def run(target_name: str, dry_run: bool, umbral_dup: float, umbral_gris: float):
+    """Ejecución standalone del deduplicador (toda la BD de un destino)."""
     if not os.getenv("OPENAI_API_KEY"):
         sys.exit("Falta OPENAI_API_KEY en .env")
     if umbral_gris >= umbral_dup:
@@ -426,64 +512,13 @@ def run(target_name: str, dry_run: bool, umbral_dup: float, umbral_gris: float):
     oai = make_openai_client()
     http = make_http_client()
     conn = get_connection(target)
+    destinos = [{"conn": conn, "target": target}]
 
     try:
-        eventos = load_eventos(conn)
-        log.info(f"Eventos ACTIVOS en BD: {len(eventos)}")
-        if len(eventos) < 2:
-            log.info("Nada que deduplicar.")
-            return
-
-        # Pasada 0: familias por evento paraguas (determinista, sin coste)
-        asignar_familias_por_paraguas(conn, eventos, dry_run)
-
-        pares = generar_pares(eventos)
-        log.info(f"Pares candidatos (misma ciudad + fechas solapadas ±{BLOCK_MARGEN_DIAS}d): {len(pares)}")
-        if not pares:
-            return
-
-        emb, _ = calcular_embeddings(oai, eventos)
-
-        borrados = set()
-        n_fusion = n_familia = n_distinto = n_juez = 0
-        for a, b in sorted(pares, key=lambda p: -score_par(p[0], p[1], emb)):
-            if a["id"] in borrados or b["id"] in borrados:
-                continue
-            s = score_par(a, b, emb)
-            # Dentro de la misma familia el umbral del juez baja: dos piezas del
-            # mismo festival pueden parecerse poco y aun así ser el MISMO evento
-            # (las dos notas del "festival entero" desde webs distintas).
-            misma_familia = bool(a.get("ID_Familia")) and a["ID_Familia"] == b.get("ID_Familia")
-            gris_efectivo = UMBRAL_GRIS_FAMILIA if misma_familia else umbral_gris
-            if s < gris_efectivo:
-                n_distinto += 1
-                continue
-
-            if s >= umbral_dup:
-                relacion = "MISMO"
-                log.info(f"score {s:.3f} (auto) — '{a['Titulo_CAT'][:40]}' vs "
-                         f"'{b['Titulo_CAT'][:40]}'")
-            else:
-                veredicto = juzgar_par(oai, a, b)
-                n_juez += 1
-                relacion = veredicto["relacion"]
-                log.info(f"score {s:.3f} (juez: {relacion}) — '{a['Titulo_CAT'][:40]}' vs "
-                         f"'{b['Titulo_CAT'][:40]}' · {veredicto['motivo'][:80]}")
-
-            if relacion == "MISMO":
-                ganador, perdedor = elegir_ganador(a, b)
-                fusionar_eventos(conn, http, target, ganador, perdedor, dry_run)
-                borrados.add(perdedor["id"])
-                n_fusion += 1
-            elif relacion == "MISMA_FAMILIA":
-                agrupar_familia(conn, a, b, dry_run)
-                n_familia += 1
-            else:
-                n_distinto += 1
-
+        n_fusion, n_familia = dedupe_poblacion(oai, http, destinos, None,
+                                               dry_run, umbral_dup, umbral_gris)
         log.info("=" * 64)
-        log.info(f"RESULTADO: {n_fusion} fusiones · {n_familia} agrupaciones de "
-                 f"familia · {n_distinto} descartados · {n_juez} pares juzgados por LLM")
+        log.info(f"RESULTADO: {n_fusion} fusiones · {n_familia} agrupaciones de familia")
         if dry_run:
             log.info("(dry-run: no se ha tocado la BD; las fusiones/familias son simulación)")
         COST.report()

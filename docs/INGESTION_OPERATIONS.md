@@ -552,7 +552,12 @@ python scripts/dedupe_events.py --target local            # aplica
   para fusionar las piezas que son "el festival entero" desde varias fuentes.
 - **La API agrupa por familia**: `GET /api/v1/events` devuelve una tarjeta por
   familia (la cabeza, con `es_familia` y sus `actividades` anidadas).
-- Idempotente; pensado para el cron justo después de `ingest_all.py`.
+- **Integrado en el pipeline**: `ingest_all.py` (modo BD) ejecuta el dedupe
+  automáticamente tras parsear cada población — análisis una sola vez en la BD
+  primaria, fusiones/familias aplicadas a todos los destinos (`--target both`
+  incluido). Desactivable con `--sin-dedupe`. La ejecución standalone del
+  script sigue disponible para pasadas manuales o calibración con `--dry-run`.
+- Idempotente.
 - Railway: tras fusiones, ejecutar `ingest_all.py --sync-images-only --target
   railway` para resubir las imágenes traspasadas a su nueva ruta.
 

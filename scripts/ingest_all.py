@@ -54,7 +54,9 @@ USO
     python ingest_all.py --target railway           # ídem contra Railway
     python ingest_all.py --target both              # extrae 1 vez, persiste en AMBAS BDs
     python ingest_all.py --hard-reset --target both # vacía datos de ingesta y reingesta todo
-    python ingest_all.py --solo-poblacion "Malgrat de Mar"
+    python ingest_all.py --poblacion "Malgrat de Mar"   # solo esa población
+    # Tras parsear cada población se ejecuta automáticamente la deduplicación/
+    # agrupación en familias (dedupe_events). Desactivable con --sin-dedupe.
     python ingest_all.py --dry-run                  # no escribe BD/imágenes (SÍ gasta LLM)
     python ingest_all.py --refresh                  # ignora incremental y fingerprints
     python ingest_all.py --input fuentes.json       # modo legacy JSON plano
@@ -2861,7 +2863,8 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
 
 def run_db(dry_run: bool, umbral: float, refresh: bool = False,
            target_name: str = "local", api_base_url: Optional[str] = None,
-           solo_poblacion: Optional[str] = None, hard_reset: bool = False):
+           solo_poblacion: Optional[str] = None, hard_reset: bool = False,
+           con_dedupe: bool = True):
     """Pipeline dirigido por BD: las fuentes/targets salen de BIBLIOTECA_FUENTES
     + SCRAPING_TARGETS (cargadas con scripts/import_fuentes.py). Es el modo
     pensado para el cron diario: detección de cambios por URL, ingesta
@@ -3058,6 +3061,19 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
             log.info(f"  Persistidos en {pob}: {persistidos} eventos, "
                      f"{noticias_persistidas} noticias")
 
+            # --- Deduplicación/familias de la población recién parseada ---
+            # Análisis (embeddings + juez) una sola vez sobre la BD primaria;
+            # las fusiones/familias se aplican a todos los destinos. Un fallo
+            # aquí no tumba el run (la ingesta ya está persistida).
+            if con_dedupe and not dry_run:
+                try:
+                    from dedupe_events import dedupe_poblacion
+                    dedupe_poblacion(oai, http, destinos, pob,
+                                     dry_run=False, cost=COST)
+                except Exception as e:
+                    log.error(f"  Dedupe falló en {pob} (la ingesta no se ve "
+                              f"afectada): {e}", exc_info=True)
+
         # Limpieza final + sincronización (por destino)
         for d in destinos:
             purge_binarios_huerfanos(d["conn"], d["target"], dry_run)
@@ -3098,8 +3114,12 @@ def main():
                     help=("Reprocesa TODO: ignora la omisión incremental de eventos/noticias "
                           "ya en BD y la detección de cambios por URL (ETag/fingerprint). "
                           "Por defecto la ingesta es incremental para ahorrar coste."))
-    ap.add_argument("--solo-poblacion", default=None, metavar="NOMBRE",
+    ap.add_argument("--poblacion", "--solo-poblacion", dest="solo_poblacion",
+                    default=None, metavar="NOMBRE",
                     help="Procesa solo los targets de esa población (solo modo BD)")
+    ap.add_argument("--sin-dedupe", action="store_true",
+                    help=("Desactiva la deduplicación/familias automática que se "
+                          "ejecuta tras parsear cada población (solo modo BD)."))
     ap.add_argument("--target", choices=("local", "railway", "both"), default="local",
                     help=("Destino de la ingesta: 'local' usa DB_* (Docker); "
                           "'railway' usa RAILWAY_DB_* y sube imágenes al servidor API; "
@@ -3133,7 +3153,7 @@ def main():
         else:
             run_db(args.dry_run, args.umbral, args.refresh,
                    args.target, args.api_base_url, args.solo_poblacion,
-                   args.hard_reset)
+                   args.hard_reset, con_dedupe=not args.sin_dedupe)
     finally:
         liberar_lock()
 
