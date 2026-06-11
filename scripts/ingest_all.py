@@ -619,6 +619,8 @@ class MergedEvent:
     recinto_canonico: str = ""
     recinto_tipo: str = "OTRO"
     evento_paraguas: str = ""   # nombre canónico del festival/ciclo al que pertenece
+    desc_corta: str = ""        # resumen 2-3 frases (CA) para tarjetas
+    desc_corta_es: str = ""     # resumen 2-3 frases (ES) para tarjetas
 
 
 def familia_id(poblacion: str, paraguas: str) -> str:
@@ -653,6 +655,8 @@ class Noticia:
     # rellenado en enriquecimiento:
     titulo_es: str = ""
     cuerpo_es: str = ""
+    resumen: str = ""      # resumen 2-3 frases (CA) para tarjetas
+    resumen_es: str = ""   # resumen 2-3 frases (ES) para tarjetas
     tags_ca: list = field(default_factory=list)
     tags_es: list = field(default_factory=list)
 
@@ -1095,6 +1099,17 @@ ENRICHMENT_SCHEMA = {
         "properties": {
             "titulo_es": {"type": "string", "description": "Traducción al castellano. Mantén nombres propios."},
             "desc_larga_es": {"type": "string", "description": "Traducción al castellano de la descripción. '' si vacía."},
+            "desc_corta_ca": {
+                "type": "string",
+                "description": ("Resumen en catalán para LECTURA RÁPIDA en una tarjeta: "
+                                "2-3 frases, máximo ~300 caracteres. Qué es, qué se hará y "
+                                "para quién. NO repitas el título, NO repitas fecha/hora/lugar "
+                                "(la tarjeta ya los muestra), sin relleno institucional."),
+            },
+            "desc_corta_es": {
+                "type": "string",
+                "description": "El mismo resumen en castellano.",
+            },
             "tags_ca": {
                 "type": "array", "items": {"type": "string"}, "minItems": 5, "maxItems": 10,
                 "description": ("5-10 tags GENÉRICOS en catalán para búsqueda. Conceptos amplios "
@@ -1134,7 +1149,8 @@ ENRICHMENT_SCHEMA = {
                                 "null si es un evento independiente que no cuelga de nada."),
             },
         },
-        "required": ["titulo_es", "desc_larga_es", "tags_ca", "tags_es",
+        "required": ["titulo_es", "desc_larga_es", "desc_corta_ca", "desc_corta_es",
+                     "tags_ca", "tags_es",
                      "categorias_codigos", "categoria_principal",
                      "recinto_canonico", "recinto_tipo", "evento_paraguas"],
         "additionalProperties": False,
@@ -1290,13 +1306,20 @@ NOTICIA_ENRICH_SCHEMA = {
             "titulo_es": {"type": "string", "description": "Título en castellano (traduce si el original es catalán)."},
             "cuerpo_ca": {"type": "string", "description": "Cuerpo en catalán. '' si vacío."},
             "cuerpo_es": {"type": "string", "description": "Cuerpo en castellano. '' si vacío."},
+            "resumen_ca": {
+                "type": "string",
+                "description": ("Resumen en catalán para LECTURA RÁPIDA: 2-3 frases, "
+                                "máximo ~300 caracteres, con el dato esencial de la "
+                                "noticia. NO repitas el título, sin relleno institucional."),
+            },
+            "resumen_es": {"type": "string", "description": "El mismo resumen en castellano."},
             "tags_ca": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 8,
                         "description": "3-8 tags GENÉRICOS en catalán (temática, ámbito, público). PROHIBIDO nombres propios."},
             "tags_es": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 8,
                         "description": "Mismos tags en castellano, mismo orden."},
         },
         "required": ["titulo_ca", "titulo_es", "cuerpo_ca", "cuerpo_es",
-                     "tags_ca", "tags_es"],
+                     "resumen_ca", "resumen_es", "tags_ca", "tags_es"],
         "additionalProperties": False,
     },
 }
@@ -1519,6 +1542,8 @@ def enrich(oai, pob, ev: MergedEvent):
                  op="enriquecimiento", context=ev.titulo[:60])
     ev.titulo_es = d["titulo_es"]
     ev.desc_larga_es = d["desc_larga_es"]
+    ev.desc_corta = (d.get("desc_corta_ca") or "").strip()[:500]
+    ev.desc_corta_es = (d.get("desc_corta_es") or "").strip()[:500]
     ev.tags_ca = d["tags_ca"]
     ev.tags_es = d["tags_es"]
     cats = list(d["categorias_codigos"])
@@ -2017,10 +2042,11 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
             ID_Unico_Evento, Metodo_Ingesta, ID_Usuario_Carga, Fuente_ID, Fuente_URL_Original,
             Estado, ID_Ciudad, ID_Recinto, CP_Evento, Poblacion_Nombre, Lugar_Nombre,
             Direccion_Fisica, Coordenadas_JSON, ID_Familia, Organizador_Nombre, Es_Patrocinado, Idioma_Origen,
-            Titulo_CAT, Titulo_ES, Desc_Larga_CAT, Desc_Larga_ES, Tags_CAT, Tags_ES,
+            Titulo_CAT, Titulo_ES, Desc_Larga_CAT, Desc_Larga_ES, Desc_Corta_CAT, Desc_Corta_ES,
+            Tags_CAT, Tags_ES,
             Es_Gratuito, Precio_Euros, Requiere_Inscripcion, Link_Entradas_Inscripcion
         ) VALUES (%s,'SCRAPING','ingestion_cli','URL_ESTRUCTURAL',%s,'ACTIVO',%s,%s,%s,%s,%s,
-                  %s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                  %s,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON DUPLICATE KEY UPDATE
             Fuente_URL_Original=VALUES(Fuente_URL_Original), ID_Ciudad=VALUES(ID_Ciudad),
             ID_Recinto=VALUES(ID_Recinto), CP_Evento=VALUES(CP_Evento),
@@ -2030,6 +2056,7 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
             Organizador_Nombre=VALUES(Organizador_Nombre), Idioma_Origen=VALUES(Idioma_Origen),
             Titulo_CAT=VALUES(Titulo_CAT), Titulo_ES=VALUES(Titulo_ES),
             Desc_Larga_CAT=VALUES(Desc_Larga_CAT), Desc_Larga_ES=VALUES(Desc_Larga_ES),
+            Desc_Corta_CAT=VALUES(Desc_Corta_CAT), Desc_Corta_ES=VALUES(Desc_Corta_ES),
             Tags_CAT=VALUES(Tags_CAT), Tags_ES=VALUES(Tags_ES), Es_Gratuito=VALUES(Es_Gratuito),
             Precio_Euros=VALUES(Precio_Euros), Requiere_Inscripcion=VALUES(Requiere_Inscripcion),
             Link_Entradas_Inscripcion=VALUES(Link_Entradas_Inscripcion)
@@ -2039,6 +2066,7 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
             ev.direccion_fisica or None, json.dumps(coords), id_fam,
             ev.organizador_nombre or None, "ca",
             ev.titulo, titulo_es, ev.descripcion_larga or "", ev.desc_larga_es or "",
+            ev.desc_corta or None, ev.desc_corta_es or None,
             json.dumps(ev.tags_ca, ensure_ascii=False), json.dumps(ev.tags_es, ensure_ascii=False),
             ev.es_gratuito, ev.precio_euros, 1 if ev.link_inscripcion else 0,
             ev.link_inscripcion or None,
@@ -2317,6 +2345,8 @@ def enriquecer_noticia(oai, noticia: Noticia):
     noticia.cuerpo = d["cuerpo_ca"] or noticia.cuerpo
     noticia.titulo_es = d["titulo_es"] or noticia.titulo
     noticia.cuerpo_es = d["cuerpo_es"] or noticia.cuerpo
+    noticia.resumen = (d.get("resumen_ca") or "").strip()[:500]
+    noticia.resumen_es = (d.get("resumen_es") or "").strip()[:500]
     noticia.tags_ca = d["tags_ca"]
     noticia.tags_es = d["tags_es"]
 
@@ -2372,17 +2402,20 @@ def persist_noticia(conn, http, noticia: Noticia, id_ciudad: int,
         cur.execute("""
             INSERT INTO NOTICIAS_MASTER
                 (ID_Unico_Noticia, ID_Ciudad, ID_Fuente, Fuente_URL_Original,
-                 Titulo_CAT, Titulo_ES, Cuerpo_CAT, Cuerpo_ES, Tags_CAT, Tags_ES,
+                 Titulo_CAT, Titulo_ES, Cuerpo_CAT, Cuerpo_ES,
+                 Resumen_CAT, Resumen_ES, Tags_CAT, Tags_ES,
                  Fecha_Publicacion, Fecha_Caducidad, Estado, Idioma_Origen)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
                     DATE_ADD(%s, INTERVAL %s DAY),'ACTIVA',%s)
             ON DUPLICATE KEY UPDATE
                 Titulo_ES=VALUES(Titulo_ES), Cuerpo_CAT=VALUES(Cuerpo_CAT),
-                Cuerpo_ES=VALUES(Cuerpo_ES), Tags_CAT=VALUES(Tags_CAT),
-                Tags_ES=VALUES(Tags_ES)
+                Cuerpo_ES=VALUES(Cuerpo_ES),
+                Resumen_CAT=VALUES(Resumen_CAT), Resumen_ES=VALUES(Resumen_ES),
+                Tags_CAT=VALUES(Tags_CAT), Tags_ES=VALUES(Tags_ES)
         """, (nid, id_ciudad, noticia.id_fuente, noticia.fuente_url,
               noticia.titulo, noticia.titulo_es or noticia.titulo,
               noticia.cuerpo or "", noticia.cuerpo_es or "",
+              noticia.resumen or None, noticia.resumen_es or None,
               json.dumps(noticia.tags_ca, ensure_ascii=False),
               json.dumps(noticia.tags_es, ensure_ascii=False),
               fecha_pub, fecha_pub, NEWS_VIGENCIA_DIAS, noticia.idioma))

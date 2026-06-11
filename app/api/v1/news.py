@@ -42,18 +42,23 @@ def _row_to_news(row) -> Dict[str, Any]:
         "titulo_es": row[3],
         "cuerpo_cat": row[4],
         "cuerpo_es": row[5],
-        "tags_cat": _parse_tags(row[6]),
-        "tags_es": _parse_tags(row[7]),
-        "fecha_publicacion": row[8].isoformat() if row[8] else None,
-        "imagen_principal_url": row[9],
-        "fuente_url_original": row[10],
-        "idioma_origen": row[11],
+        "resumen_cat": row[6],
+        "resumen_es": row[7],
+        "tags_cat": _parse_tags(row[8]),
+        "tags_es": _parse_tags(row[9]),
+        "fecha_publicacion": row[10].isoformat() if row[10] else None,
+        "imagen_principal_url": row[11],
+        "fuente_url_original": row[12],
+        "idioma_origen": row[13],
     }
 
 
 _SELECT_NEWS = """
     SELECT n.ID_Unico_Noticia, c.Nombre, n.Titulo_CAT, n.Titulo_ES,
-           n.Cuerpo_CAT, n.Cuerpo_ES, n.Tags_CAT, n.Tags_ES,
+           n.Cuerpo_CAT, n.Cuerpo_ES,
+           COALESCE(NULLIF(n.Resumen_CAT, ''), LEFT(COALESCE(n.Cuerpo_CAT, ''), 300)),
+           COALESCE(NULLIF(n.Resumen_ES, ''), LEFT(COALESCE(n.Cuerpo_ES, ''), 300)),
+           n.Tags_CAT, n.Tags_ES,
            n.Fecha_Publicacion, n.Imagen_Principal_URL,
            n.Fuente_URL_Original, n.Idioma_Origen
     FROM NOTICIAS_MASTER n
