@@ -460,11 +460,36 @@ python scripts/import_fuentes.py --input scripts/fuentes/Blanes.json  --target l
 python scripts/ingest_all.py --target local
 python scripts/ingest_all.py --target railway          # contra producción
 python scripts/ingest_all.py --target both             # extrae 1 vez, persiste en AMBAS BDs
-python scripts/ingest_all.py --solo-poblacion "Malgrat de Mar"
+python scripts/ingest_all.py --poblacion "Malgrat de Mar"
 python scripts/ingest_all.py --dry-run                 # no escribe (SÍ gasta LLM)
 python scripts/ingest_all.py --refresh                 # ignora incremental y fingerprints
 python scripts/ingest_all.py --hard-reset --target both  # borra datos de ingesta y reingesta de cero
+python scripts/ingest_all.py --modelo gpt-4.1-nano     # modelo del run (comparar calidad/coste)
+python scripts/ingest_all.py --max-items 5 --poblacion "Malgrat de Mar"  # run de PRUEBA barato
 ```
+
+**Optimización de entrada**: las llamadas LLM de texto reciben el TEXTO VISIBLE
+con enlaces/imágenes inline (no HTML crudo): ~60-70% menos tokens de input,
+con tope `LLM_MAX_INPUT_CHARS` (env, default 20000). Si una web extrae mal
+tras este cambio, comprobar que sus URLs de detalle aparecen como `[ancla](url)`
+en el texto convertido.
+
+**`--max-items N`** (pruebas): procesa como mucho N eventos+noticias nuevos por
+población y para; NINGÚN target del run guarda fingerprint, así el siguiente
+run completo reprocesa todo con normalidad.
+
+### Costes: persistencia, API y pestaña del front
+
+Cada run (no dry-run) guarda su gasto en `INGESTA_RUNS` (totales) e
+`INGESTA_COSTES` (desglose población × operación) en todos los destinos.
+Aplicar una vez `SQL/costes_delta.sql` en cada BD.
+
+- `GET /api/v1/costs/runs` — histórico de ejecuciones.
+- `GET /api/v1/costs/runs/{id}` — detalle con desglose por población/operación.
+- `GET /api/v1/costs/summary?dias=30` — agregado del periodo (total, por día,
+  por población).
+- Front: pestaña **Costes** (último run, Malgrat vs Blanes, por operación,
+  gasto diario e histórico).
 
 **`--target both`**: la extracción y las llamadas LLM se hacen UNA sola vez y
 se persiste en las dos BDs. La local es la primaria (targets, estado
