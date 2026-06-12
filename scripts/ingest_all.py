@@ -122,7 +122,20 @@ except ImportError:
 # CONFIGURACIÓN
 # ============================================================================
 
-LLM_MODEL = "gpt-4.1-mini"
+# Modelo LLM del run. Seleccionable con --modelo (o env LLM_MODEL) para poder
+# comparar calidad/coste entre gpt-4.1-mini y gpt-4.1-nano sobre el mismo contenido.
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4.1-mini")
+
+
+def set_llm_model(modelo: str):
+    global LLM_MODEL
+    LLM_MODEL = modelo
+
+
+# Tope de caracteres de texto enviados por llamada LLM (tras convertir el HTML
+# a texto+enlaces). Protege de páginas monstruosas; configurable por env.
+LLM_MAX_INPUT_CHARS = int(os.getenv("LLM_MAX_INPUT_CHARS", "20000"))
+
 DEFAULT_EVENTS_API_BASE_URL = "https://eventquery.km0lab.com"
 
 IMAGES_DIR = Path("static") / "images"
@@ -340,9 +353,13 @@ log = logging.getLogger("ingest_all")
 # Precios oficiales en USD por 1.000.000 de tokens. Si en el futuro cambian las
 # tarifas o se usa otro modelo, basta con actualizar esta tabla.
 MODEL_PRICES = {
-    # gpt-4.1-mini
     "gpt-4.1-mini": {"input": 0.40, "cached_input": 0.10, "output": 1.60},
+    "gpt-4.1-nano": {"input": 0.10, "cached_input": 0.025, "output": 0.40},
 }
+
+# Embeddings (deduplicación semántica): se contabilizan con su propia tarifa
+# en el campo coste_extra de los buckets (no con la tarifa del modelo de chat).
+EMBED_PRICE_PER_M = 0.02  # text-embedding-3-small, USD/1M tokens
 
 
 def _prices_for(model: str) -> dict:
@@ -360,6 +377,7 @@ class CostTracker:
     def __init__(self):
         self.by_pob = {}
         self.by_op = {}
+        self.by_pob_op = {}   # clave (poblacion, operacion): desglose persistible
         self.global_stats = self._new_bucket()
 
     def _new_bucket(self):
@@ -368,7 +386,8 @@ class CostTracker:
             "tokens_in": 0,        # tokens de entrada NO cacheados
             "tokens_cached": 0,    # tokens de entrada cacheados (tarifa reducida)
             "tokens_out": 0,       # tokens de salida
-            "imagenes": 0, "eventos": 0,
+            "coste_extra": 0.0,    # coste con tarifa propia (embeddings)
+            "imagenes": 0, "eventos": 0, "noticias": 0,
         }
 
     def _bucket(self, store, key):
@@ -391,11 +410,23 @@ class CostTracker:
         no_cacheados = max(prompt - cached, 0)
         for b in (self._bucket(self.by_pob, pob),
                   self._bucket(self.by_op, op),
+                  self._bucket(self.by_pob_op, (pob, op)),
                   self.global_stats):
             b["llm_calls"] += 1
             b["tokens_in"] += no_cacheados
             b["tokens_cached"] += cached
             b["tokens_out"] += out
+
+    def add_embedding(self, pob, tokens: int):
+        """Una llamada batch de embeddings (deduplicación). El coste va en
+        coste_extra con su tarifa propia, no con la del modelo de chat."""
+        coste = tokens / 1_000_000 * EMBED_PRICE_PER_M
+        for b in (self._bucket(self.by_pob, pob),
+                  self._bucket(self.by_op, "embeddings"),
+                  self._bucket(self.by_pob_op, (pob, "embeddings")),
+                  self.global_stats):
+            b["llm_calls"] += 1
+            b["coste_extra"] += coste
 
     def add_imagen(self, pob, n=1):
         self._bucket(self.by_pob, pob)["imagenes"] += n
@@ -405,11 +436,16 @@ class CostTracker:
         self._bucket(self.by_pob, pob)["eventos"] += n
         self.global_stats["eventos"] += n
 
+    def add_noticia(self, pob, n=1):
+        self._bucket(self.by_pob, pob)["noticias"] += n
+        self.global_stats["noticias"] += n
+
     @staticmethod
     def _coste(b, prices):
         return (b["tokens_in"] / 1_000_000 * prices["input"] +
                 b["tokens_cached"] / 1_000_000 * prices["cached_input"] +
-                b["tokens_out"] / 1_000_000 * prices["output"])
+                b["tokens_out"] / 1_000_000 * prices["output"] +
+                b.get("coste_extra", 0.0))
 
     def report(self):
         prices = _prices_for(LLM_MODEL)
@@ -455,9 +491,44 @@ class CostTracker:
         log.info(f"Tokens salida   : {g['tokens_out']:,}")
         log.info(f"Imágenes descargadas: {g['imagenes']:,}")
         log.info(f"Eventos persistidos : {g['eventos']:,}")
+        log.info(f"Noticias persistidas: {g['noticias']:,}")
         log.info("-" * W)
         log.info(f">>> GASTO TOTAL OPENAI: ${self._coste(g, prices):.4f} USD")
         log.info("=" * W)
+
+    def persistir_run(self, conn, inicio: datetime, target_name: str,
+                      parametros: str, resumen_targets: dict):
+        """Guarda el run en INGESTA_RUNS + desglose población×operación en
+        INGESTA_COSTES. Permite consultar el gasto histórico desde la API/front."""
+        prices = _prices_for(LLM_MODEL)
+        g = self.global_stats
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO INGESTA_RUNS
+                    (Inicio, Fin, Target, Modelo, Parametros, Llamadas,
+                     Tokens_In, Tokens_Cached, Tokens_Out, Coste_USD,
+                     Imagenes, Eventos_Persistidos, Noticias_Persistidas,
+                     Targets_OK, Targets_Skip, Targets_Error)
+                VALUES (%s, NOW(), %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s)
+            """, (inicio, target_name, LLM_MODEL, parametros[:255],
+                  g["llm_calls"], g["tokens_in"], g["tokens_cached"],
+                  g["tokens_out"], round(self._coste(g, prices), 4),
+                  g["imagenes"], g["eventos"], g["noticias"],
+                  resumen_targets.get("OK", 0), resumen_targets.get("SKIP", 0),
+                  resumen_targets.get("ERROR", 0)))
+            id_run = cur.lastrowid
+            for (pob, op), b in self.by_pob_op.items():
+                cur.execute("""
+                    INSERT INTO INGESTA_COSTES
+                        (ID_Run, Poblacion, Operacion, Llamadas,
+                         Tokens_In, Tokens_Cached, Tokens_Out, Coste_USD)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (id_run, pob, op, b["llm_calls"], b["tokens_in"],
+                      b["tokens_cached"], b["tokens_out"],
+                      round(self._coste(b, prices), 4)))
+        conn.commit()
+        return id_run
 
 
 COST = CostTracker()
@@ -999,6 +1070,51 @@ def url_ok(url: str, client: httpx.Client) -> bool:
         return r.status_code == 200 and len(r.text) > 200
     except httpx.HTTPError:
         return False
+
+
+def descargar_si_ok(url: str, client: httpx.Client) -> Optional[str]:
+    """Descarga la URL una sola vez y devuelve el HTML, o None si está rota.
+    Sustituye al patrón url_ok()+download_html() que descargaba la página DOS
+    veces (una para validar y otra para extraer)."""
+    try:
+        r = client.get(url, follow_redirects=True)
+        if r.status_code == 200 and len(r.text) > 200:
+            return r.text
+        return None
+    except httpx.HTTPError:
+        return None
+
+
+def html_a_texto_enlaces(html: str) -> str:
+    """Convierte el HTML limpio en TEXTO VISIBLE con enlaces e imágenes inline
+    (estilo markdown: 'ancla (href)' y '[imagen: src]').
+
+    Es la entrada de todas las llamadas LLM de texto: el modelo necesita el
+    contenido, las URLs de detalle y las URLs de imagen — NO los divs, clases y
+    atributos, que eran ~60-70%% de los tokens pagados. Ahorro directo de input.
+    El tope LLM_MAX_INPUT_CHARS protege de páginas monstruosas."""
+    soup = BeautifulSoup(clean_html(html), "lxml")
+    for a in soup.find_all("a"):
+        href = (a.get("href") or "").strip()
+        ancla = a.get_text(" ", strip=True)
+        if href and not href.startswith(("#", "javascript:")):
+            a.replace_with(f" [{ancla}]({href}) ")
+        else:
+            a.replace_with(f" {ancla} ")
+    for img in soup.find_all("img"):
+        src = (img.get("src") or img.get("data-src") or "").strip()
+        if src:
+            img.replace_with(f" [imagen: {src}] ")
+        else:
+            img.decompose()
+    texto = soup.get_text("\n", strip=True)
+    texto = re.sub(r"[ \t]+", " ", texto)
+    texto = re.sub(r"\n\s*\n+", "\n", texto)
+    if len(texto) > LLM_MAX_INPUT_CHARS:
+        log.info(f"    Entrada LLM truncada: {len(texto):,} -> "
+                 f"{LLM_MAX_INPUT_CHARS:,} chars")
+        texto = texto[:LLM_MAX_INPUT_CHARS]
+    return texto
 
 
 def same_or_sub_domain(url: str, base_url: str) -> bool:
@@ -1595,18 +1711,21 @@ def procesar_item_evento(oai, http, pob, cp, it, listado_url, detail_cache, ctx)
         elif ctx["details_done"] >= MAX_DETAIL_PAGES_PER_SOURCE:
             log.warning(f"    Tope de detalles ({MAX_DETAIL_PAGES_PER_SOURCE}) alcanzado")
             detail = None
-        elif not url_ok(url_det, http):
-            log.warning(f"    URL de detalle rota, descartada: {url_det}")
-            detail = None
         else:
-            try:
-                log.info(f"    Detalle [{ctx['details_done'] + 1}]: {titulo[:60]}")
-                detail = extract_detail(oai, pob, clean_html(download_html(url_det, http)), url_det)
-                detail_cache[url_det] = detail
-                ctx["details_done"] += 1
-            except Exception as e:
-                log.error(f"    Error en detalle {url_det}: {e}")
+            # una sola descarga: valida y extrae con el mismo GET
+            html_det = descargar_si_ok(url_det, http)
+            if html_det is None:
+                log.warning(f"    URL de detalle rota, descartada: {url_det}")
                 detail = None
+            else:
+                try:
+                    log.info(f"    Detalle [{ctx['details_done'] + 1}]: {titulo[:60]}")
+                    detail = extract_detail(oai, pob, html_a_texto_enlaces(html_det), url_det)
+                    detail_cache[url_det] = detail
+                    ctx["details_done"] += 1
+                except Exception as e:
+                    log.error(f"    Error en detalle {url_det}: {e}")
+                    detail = None
 
         if detail:
             aplicar_detalle_a_candidato(oai, http, pob, cand, detail)
@@ -1662,7 +1781,8 @@ def aplicar_detalle_a_candidato(oai, http, pob, cand: Candidate, detail: dict):
 
 def scrape_source(oai, http, pob, cp, listado_url, dry_run,
                   existing_events=None, umbral=SIMILARITY_THRESHOLD,
-                  refresh=False, confirmaciones=None, listing_html=None) -> list:
+                  refresh=False, confirmaciones=None, listing_html=None,
+                  max_nuevos=None) -> list:
     """Extrae candidatos de un listado de eventos. Si listing_html viene dado
     (ruta de targets en BD, ya descargado por fetch_si_cambiado) no se vuelve a
     descargar. confirmaciones: lista mutable donde se anotan (id_evento, url)
@@ -1676,8 +1796,8 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
             log.error(f"    No se pudo descargar el listado: {e}")
             return []
 
-    html_clean = clean_html(listing_html)
-    log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars HTML limpio)...")
+    html_clean = html_a_texto_enlaces(listing_html)
+    log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars texto+enlaces)...")
     items = extract_listing(oai, pob, html_clean, listado_url)
     log.info(f"    {len(items)} eventos en el listado")
 
@@ -1687,6 +1807,10 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
     omitidos = 0  # ya existentes en BD: no se reprocesan (ahorro de coste)
 
     for it in items:
+        if max_nuevos is not None and len(candidates) >= max_nuevos:
+            log.info(f"    Límite de prueba alcanzado ({max_nuevos} items nuevos): "
+                     f"resto del listado omitido")
+            break
         titulo = (it.get("titulo") or "").strip()
         fecha_inicio = (it.get("fecha_inicio") or "").strip()
         if not titulo or not fecha_inicio:
@@ -2457,9 +2581,13 @@ def procesar_item_noticia(oai, http, pob, it, listado_url) -> Optional[Noticia]:
         imagen_url=it.get("imagen_url") or "",
     )
     url_det = it.get("url_detalle")
-    if url_det and same_or_sub_domain(url_det, listado_url) and url_ok(url_det, http):
+    if url_det and same_or_sub_domain(url_det, listado_url):
+        html_det = descargar_si_ok(url_det, http)
+        if html_det is None:
+            log.warning(f"    URL de noticia rota, se usa solo el listado: {url_det}")
+            return noticia
         try:
-            detail = extraer_noticia(oai, pob, clean_html(download_html(url_det, http)), url_det)
+            detail = extraer_noticia(oai, pob, html_a_texto_enlaces(html_det), url_det)
             if detail.get("titulo"):
                 noticia.titulo = detail["titulo"].strip() or noticia.titulo
             noticia.cuerpo = (detail.get("cuerpo") or "").strip()
@@ -2588,7 +2716,7 @@ def clasificar_mensajes_telegram(oai, pob, mensajes: list) -> list:
 
 def procesar_target_telegram(oai, http, target_row: dict, existing_events: list,
                              existing_noticias: list, umbral: float,
-                             refresh: bool, confirmaciones: list):
+                             refresh: bool, confirmaciones: list, max_nuevos=None):
     """Procesa un canal de Telegram: fetch + clasificación batch + conversión a
     candidatos de evento y noticias. Devuelve (candidatos, noticias, meta, n_utiles).
 
@@ -2658,6 +2786,11 @@ def procesar_target_telegram(oai, http, target_row: dict, existing_events: list,
                 imagen_url=m["imagen_url"],
                 id_fuente=target_row["ID_Fuente"],
             ))
+
+    if max_nuevos is not None and len(candidatos) + len(noticias) > max_nuevos:
+        log.info(f"    Límite de prueba ({max_nuevos}): se recortan los items de Telegram")
+        candidatos = candidatos[:max_nuevos]
+        noticias = noticias[:max(0, max_nuevos - len(candidatos))]
 
     log.info(f"    Telegram: {len(candidatos)} eventos nuevos, {len(noticias)} noticias nuevas")
     return candidatos, noticias, meta, len(candidatos) + len(noticias)
@@ -2812,7 +2945,7 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False,
 
 def procesar_target_web(oai, http, target_row: dict, existing_events: list,
                         existing_noticias: list, umbral: float, refresh: bool,
-                        dry_run: bool, confirmaciones: list):
+                        dry_run: bool, confirmaciones: list, max_nuevos=None):
     """Procesa un target web (WEB_LISTADO, API_AGREGADOR o WEB_DETALLE) con
     detección de cambios. Devuelve (candidatos, noticias, meta, n_utiles)."""
     pob = target_row["Poblacion"]
@@ -2826,7 +2959,7 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
 
     # --- Página de detalle directa (un solo evento; típica de agregadores) ---
     if target_row["Tipo_Target"] == "WEB_DETALLE":
-        detail = extract_detail(oai, pob, clean_html(html), url)
+        detail = extract_detail(oai, pob, html_a_texto_enlaces(html), url)
         titulo = (detail.get("titulo") or "").strip()
         fecha = (detail.get("fecha_inicio") or "").strip()
         if not titulo or not (fecha or detail.get("horarios_discretos")):
@@ -2849,12 +2982,13 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
     if hint == "EVENTOS":
         cands = scrape_source(oai, http, pob, cp, url, dry_run,
                               existing_events, umbral, refresh,
-                              confirmaciones, listing_html=html)
+                              confirmaciones, listing_html=html,
+                              max_nuevos=max_nuevos)
         return cands, [], meta, len(cands) + len(confirmaciones)
 
     # --- Listado MIXTO o de NOTICIAS: clasificar cada item ---
-    html_clean = clean_html(html)
-    log.info(f"    Clasificando listado {hint} ({len(html_clean):,} chars)...")
+    html_clean = html_a_texto_enlaces(html)
+    log.info(f"    Clasificando listado {hint} ({len(html_clean):,} chars texto+enlaces)...")
     items = clasificar_items(oai, pob, html_clean, url, hint)
     n_ev = sum(1 for i in items if i.get("tipo") == "EVENTO")
     n_not = sum(1 for i in items if i.get("tipo") == "NOTICIA")
@@ -2864,6 +2998,10 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
     candidatos, noticias = [], []
     detail_cache, ctx = {}, {"details_done": 0}
     for it in items:
+        if max_nuevos is not None and len(candidatos) + len(noticias) >= max_nuevos:
+            log.info(f"    Límite de prueba alcanzado ({max_nuevos} items nuevos): "
+                     f"resto del listado omitido")
+            break
         tipo = it.get("tipo")
         titulo = (it.get("titulo") or "").strip()
         if not titulo or tipo == "DESCARTAR":
@@ -2897,7 +3035,7 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
 def run_db(dry_run: bool, umbral: float, refresh: bool = False,
            target_name: str = "local", api_base_url: Optional[str] = None,
            solo_poblacion: Optional[str] = None, hard_reset: bool = False,
-           con_dedupe: bool = True):
+           con_dedupe: bool = True, max_items: Optional[int] = None):
     """Pipeline dirigido por BD: las fuentes/targets salen de BIBLIOTECA_FUENTES
     + SCRAPING_TARGETS (cargadas con scripts/import_fuentes.py). Es el modo
     pensado para el cron diario: detección de cambios por URL, ingesta
@@ -2915,6 +3053,7 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
     if not os.getenv("OPENAI_API_KEY"):
         sys.exit("Falta OPENAI_API_KEY en .env")
 
+    inicio_run = datetime.now()
     nombres = ("local", "railway") if target_name == "both" else (target_name,)
     oai = make_openai_client()
     http = make_http_client()
@@ -2994,13 +3133,26 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
             candidates, noticias_nuevas = [], []
 
             for t in rows:
+                # Límite de prueba (--max-items): al alcanzarlo se saltan los
+                # targets restantes SIN actualizar su estado/fingerprint, para
+                # que el siguiente run completo los procese con normalidad.
+                if max_items is not None:
+                    procesados = len(candidates) + len(noticias_nuevas)
+                    if procesados >= max_items:
+                        log.info(f"  Límite de prueba alcanzado ({max_items} items): "
+                                 f"targets restantes de {pob} omitidos sin tocar su estado")
+                        break
+                    presupuesto = max_items - procesados
+                else:
+                    presupuesto = None
+
                 confirmaciones = []
                 try:
                     if t["Tipo_Target"] in ("SOCIAL_PERFIL", "SOCIAL_QUERY"):
                         if t.get("Plataforma") == "TELEGRAM":
                             cands, nots, meta, utiles = procesar_target_telegram(
                                 oai, http, t, existing_events, existing_noticias,
-                                umbral, refresh, confirmaciones)
+                                umbral, refresh, confirmaciones, presupuesto)
                         else:
                             # IG/FB/X/YouTube: conector Apify pendiente (fase 2).
                             # No deberían tener target activo; defensa por si acaso.
@@ -3010,15 +3162,19 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                     else:
                         cands, nots, meta, utiles = procesar_target_web(
                             oai, http, t, existing_events, existing_noticias,
-                            umbral, refresh, dry_run, confirmaciones)
+                            umbral, refresh, dry_run, confirmaciones, presupuesto)
 
                     candidates.extend(cands)
                     noticias_nuevas.extend(nots)
-                    # Confirmaciones y estado del target: solo en la primaria
+                    # Confirmaciones y estado del target: solo en la primaria.
+                    # Con --max-items NO se actualiza el estado/fingerprint del
+                    # target (run de prueba): el siguiente run completo debe
+                    # reprocesarlo entero.
                     registrar_confirmaciones(primario["conn"], confirmaciones,
                                              t["ID_Fuente"], dry_run)
-                    actualizar_target(primario["conn"], t, True, meta, utiles,
-                                      None, dry_run)
+                    if max_items is None:
+                        actualizar_target(primario["conn"], t, True, meta, utiles,
+                                          None, dry_run)
                     resumen["OK" if meta.get("cambio") else "SKIP"] += 1
                 except Exception as e:
                     log.error(f"  ERROR en target {t['URL_Target']}: {e}")
@@ -3091,6 +3247,7 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                                   exc_info=True)
                 if ok_alguno:
                     noticias_persistidas += 1
+            COST.add_noticia(pob, noticias_persistidas)
             log.info(f"  Persistidos en {pob}: {persistidos} eventos, "
                      f"{noticias_persistidas} noticias")
 
@@ -3102,7 +3259,7 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                 try:
                     from dedupe_events import dedupe_poblacion
                     dedupe_poblacion(oai, http, destinos, pob,
-                                     dry_run=False, cost=COST)
+                                     dry_run=False, cost=COST, modelo=LLM_MODEL)
                 except Exception as e:
                     log.error(f"  Dedupe falló en {pob} (la ingesta no se ve "
                               f"afectada): {e}", exc_info=True)
@@ -3116,6 +3273,27 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
         log.info(f"RESUMEN DE TARGETS: {resumen['OK']} con cambios · "
                  f"{resumen['SKIP']} sin cambios (skip) · {resumen['ERROR']} con error")
         COST.report()
+
+        # Persistir el gasto del run en cada destino (lo consume la API/front).
+        if not dry_run:
+            partes = [f"target={target_name}"]
+            if solo_poblacion:
+                partes.append(f"poblacion={solo_poblacion}")
+            if refresh:
+                partes.append("refresh")
+            if hard_reset:
+                partes.append("hard-reset")
+            if max_items is not None:
+                partes.append(f"max-items={max_items}")
+            parametros = " ".join(partes)
+            for d in destinos:
+                try:
+                    COST.persistir_run(d["conn"], inicio_run, d["target"].name,
+                                       parametros, resumen)
+                except Exception as e:
+                    log.warning(f"No se pudo guardar el gasto del run en "
+                                f"{d['target'].name} (¿falta SQL/costes_delta.sql?): {e}")
+
         if dry_run:
             log.info("(dry-run: no se ha tocado la BD ni descargado imágenes)")
 
@@ -3153,6 +3331,14 @@ def main():
     ap.add_argument("--sin-dedupe", action="store_true",
                     help=("Desactiva la deduplicación/familias automática que se "
                           "ejecuta tras parsear cada población (solo modo BD)."))
+    ap.add_argument("--modelo", default=None, metavar="MODELO",
+                    help=("Modelo LLM del run (default: env LLM_MODEL o gpt-4.1-mini). "
+                          "Útil para comparar calidad/coste: gpt-4.1-mini vs gpt-4.1-nano."))
+    ap.add_argument("--max-items", type=int, default=None, metavar="N",
+                    help=("Límite de PRUEBA: procesa como mucho N eventos+noticias "
+                          "nuevos por población y para. Los targets afectados NO "
+                          "guardan fingerprint (el siguiente run completo los "
+                          "reprocesa). Solo modo BD."))
     ap.add_argument("--target", choices=("local", "railway", "both"), default="local",
                     help=("Destino de la ingesta: 'local' usa DB_* (Docker); "
                           "'railway' usa RAILWAY_DB_* y sube imágenes al servidor API; "
@@ -3167,6 +3353,8 @@ def main():
                     help=("URL base de la API en producción (solo con --target railway). "
                           "Por defecto EVENTS_API_BASE_URL o https://eventquery.km0lab.com"))
     args = ap.parse_args()
+    if args.modelo:
+        set_llm_model(args.modelo)
     if args.sync_images_only:
         if args.target == "both":
             ap.error("--sync-images-only requiere --target railway")
@@ -3176,6 +3364,8 @@ def main():
         ap.error("--target both solo está soportado en modo BD (sin --input)")
     if args.input and args.hard_reset:
         ap.error("--hard-reset solo está soportado en modo BD (sin --input)")
+    if args.input and args.max_items is not None:
+        ap.error("--max-items solo está soportado en modo BD (sin --input)")
 
     if not adquirir_lock():
         sys.exit(1)
@@ -3186,7 +3376,8 @@ def main():
         else:
             run_db(args.dry_run, args.umbral, args.refresh,
                    args.target, args.api_base_url, args.solo_poblacion,
-                   args.hard_reset, con_dedupe=not args.sin_dedupe)
+                   args.hard_reset, con_dedupe=not args.sin_dedupe,
+                   max_items=args.max_items)
     finally:
         liberar_lock()
 

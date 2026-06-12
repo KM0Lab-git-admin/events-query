@@ -250,7 +250,7 @@ def score_par(a, b, emb) -> float:
 # JUEZ LLM (zona gris)
 # ============================================================================
 
-def juzgar_par(oai, a, b, cost=None) -> dict:
+def juzgar_par(oai, a, b, cost=None, modelo=None) -> dict:
     system = (
         "Decides la relación entre dos eventos municipales de la misma ciudad. "
         "MISMO: el mismo evento publicado por fuentes distintas, aunque el "
@@ -267,7 +267,7 @@ def juzgar_par(oai, a, b, cost=None) -> dict:
                 f"Descripción: {(e['Desc_Larga_CAT'] or '')[:800]}")
 
     resp = oai.chat.completions.create(
-        model=LLM_MODEL,
+        model=modelo or LLM_MODEL,
         messages=[{"role": "system", "content": system},
                   {"role": "user", "content": ficha(a, 1) + "\n\n" + ficha(b, 2)}],
         response_format={"type": "json_schema", "json_schema": JUDGE_SCHEMA},
@@ -426,7 +426,7 @@ def agrupar_familia(destinos: list, a, b, dry_run) -> str:
 
 def dedupe_poblacion(oai, http, destinos: list, poblacion: str = None,
                      dry_run: bool = False, umbral_dup: float = None,
-                     umbral_gris: float = None, cost=None) -> tuple:
+                     umbral_gris: float = None, cost=None, modelo=None) -> tuple:
     """Núcleo de deduplicación, invocable desde ingest_all tras cada población.
 
     destinos = [{"conn": ..., "target": IngestTarget}, ...]: el ANÁLISIS
@@ -455,7 +455,9 @@ def dedupe_poblacion(oai, http, destinos: list, poblacion: str = None,
     log.info(f"  Pares candidatos (misma ciudad + fechas solapadas "
              f"±{BLOCK_MARGEN_DIAS}d): {len(pares)}")
 
-    emb, _ = calcular_embeddings(oai, eventos)
+    emb, emb_tokens = calcular_embeddings(oai, eventos)
+    if cost is not None and hasattr(cost, "add_embedding"):
+        cost.add_embedding(poblacion or "(global)", emb_tokens)
 
     borrados = set()
     n_fusion = n_familia = n_distinto = n_juez = 0
@@ -477,7 +479,7 @@ def dedupe_poblacion(oai, http, destinos: list, poblacion: str = None,
             log.info(f"  score {s:.3f} (auto) — '{a['Titulo_CAT'][:40]}' vs "
                      f"'{b['Titulo_CAT'][:40]}'")
         else:
-            veredicto = juzgar_par(oai, a, b, cost)
+            veredicto = juzgar_par(oai, a, b, cost, modelo)
             n_juez += 1
             relacion = veredicto["relacion"]
             log.info(f"  score {s:.3f} (juez: {relacion}) — '{a['Titulo_CAT'][:40]}' vs "
