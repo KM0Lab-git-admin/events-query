@@ -1672,3 +1672,178 @@ body {
 .event-card-actividades .actividad-item strong {
   font-weight: 600;
 }
+
+/* ===== Pestañas del header ===== */
+.header-tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.header-tab {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  color: #fff;
+  padding: 6px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.header-tab-active {
+  background: rgba(255, 255, 255, 0.18);
+  border-color: #fff;
+  font-weight: 600;
+}
+
+/* ===== Pestaña Costes ===== */
+.costs-container {
+  padding: 16px 20px 40px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.costs-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.costs-section {
+  margin-bottom: 28px;
+}
+
+.costs-section h3 {
+  margin: 8px 0 12px;
+  font-size: 1.05rem;
+}
+
+.costs-section h4 {
+  margin: 6px 0 8px;
+  font-size: 0.92rem;
+  color: #555;
+}
+
+.costs-params {
+  color: #888;
+  font-size: 0.85em;
+  font-weight: 400;
+}
+
+.costs-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.cost-card {
+  background: #fff;
+  border: 1px solid #e3e7ee;
+  border-radius: 8px;
+  padding: 10px 16px;
+  min-width: 130px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cost-card-main {
+  border-color: #5c7cfa;
+  background: #f3f6ff;
+}
+
+.cost-card-value {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.cost-card-label {
+  font-size: 0.75rem;
+  color: #666;
+}
+
+.costs-tables {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+
+.costs-table-wrap {
+  flex: 1 1 380px;
+  min-width: 320px;
+}
+
+.costs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  background: #fff;
+}
+
+.costs-table th,
+.costs-table td {
+  border: 1px solid #e3e7ee;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.costs-table th {
+  background: #f6f8fb;
+  font-weight: 600;
+}
+
+.costs-table td:nth-child(n+2):not(.costs-params),
+.costs-table th:nth-child(n+2) {
+  text-align: right;
+}
+
+.costs-money {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.costs-table-full td,
+.costs-table-full th {
+  white-space: nowrap;
+}
+
+/* Barras CSS del gasto por día */
+.costs-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.costs-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.8rem;
+}
+
+.costs-bar-fecha {
+  width: 44px;
+  color: #666;
+}
+
+.costs-bar-track {
+  flex: 1;
+  background: #eef1f6;
+  border-radius: 4px;
+  height: 14px;
+  overflow: hidden;
+}
+
+.costs-bar-fill {
+  height: 100%;
+  background: #5c7cfa;
+  border-radius: 4px;
+}
+
+.costs-bar-valor {
+  width: 70px;
+  text-align: right;
+  font-weight: 600;
+}
