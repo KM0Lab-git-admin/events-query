@@ -110,7 +110,13 @@ allowed_origins = [
     "https://eventquery.km0lab.com",
     "http://localhost:5173",  # Vite dev
     "http://localhost:3000",  # React dev
+    "https://char-con-todos.lovable.app",  # Lovable publicado
+    "https://preview--char-con-todos.lovable.app",  # Lovable preview
 ]
+
+# Previews del editor de Lovable usan prefijos variables
+# (preview--, id-preview--...) sobre el mismo dominio del proyecto.
+allowed_origin_regex = r"https://[a-z0-9-]+--char-con-todos\.lovable\.app"
 
 # In development, allow all origins
 if settings.environment == "development":
@@ -119,6 +125,7 @@ if settings.environment == "development":
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
+    allow_origin_regex=allowed_origin_regex,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
