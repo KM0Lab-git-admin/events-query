@@ -1213,8 +1213,29 @@ ENRICHMENT_SCHEMA = {
     "schema": {
         "type": "object",
         "properties": {
-            "titulo_es": {"type": "string", "description": "Traducción al castellano. Mantén nombres propios."},
-            "desc_larga_es": {"type": "string", "description": "Traducción al castellano de la descripción. '' si vacía."},
+            "titulo_ca": {
+                "type": "string",
+                "description": ("Título en catalán. Si el original ya es catalán, "
+                                "límpialo/normalízalo; si está en castellano, tradúcelo. "
+                                "Mantén nombres propios."),
+            },
+            "titulo_es": {
+                "type": "string",
+                "description": ("Título en castellano. Si el original ya es castellano, "
+                                "límpialo/normalízalo; si está en catalán, tradúcelo. "
+                                "Mantén nombres propios."),
+            },
+            "desc_larga_ca": {
+                "type": "string",
+                "description": ("Descripción larga en catalán. '' si no hay descripción. "
+                                "Si el original es castellano, tradúcelo; si ya es catalán, "
+                                "conserva el sentido limpiando basura de UI."),
+            },
+            "desc_larga_es": {
+                "type": "string",
+                "description": ("Descripción larga en castellano. '' si vacía. "
+                                "Traduce o limpia según el idioma del original."),
+            },
             "desc_corta_ca": {
                 "type": "string",
                 "description": ("Resumen en catalán para LECTURA RÁPIDA en una tarjeta: "
@@ -1265,7 +1286,8 @@ ENRICHMENT_SCHEMA = {
                                 "null si es un evento independiente que no cuelga de nada."),
             },
         },
-        "required": ["titulo_es", "desc_larga_es", "desc_corta_ca", "desc_corta_es",
+        "required": ["titulo_ca", "titulo_es", "desc_larga_ca", "desc_larga_es",
+                     "desc_corta_ca", "desc_corta_es",
                      "tags_ca", "tags_es",
                      "categorias_codigos", "categoria_principal",
                      "recinto_canonico", "recinto_tipo", "evento_paraguas"],
@@ -1641,23 +1663,29 @@ def aplicar_cartel_al_detalle(detail: dict, cartel: dict):
 
 
 ENRICH_SYSTEM = (
-    "Enriqueces eventos municipales catalanes. Devuelve JSON: traducción al "
-    "castellano, tags genéricos bilingües, categorías del catálogo cerrado, y el "
-    "recinto canónico limpio con su tipo. Traduce con naturalidad manteniendo "
-    "nombres propios. Tags = conceptos de búsqueda, nunca nombres propios ni el "
-    "lugar. Un evento DEPORTIVO va en 'deportes' y no lleva tag 'ocio'."
+    "Enriqueces eventos municipales catalanes. El título y la descripción de "
+    "entrada pueden estar en catalán o en castellano (a veces mezclados). "
+    "Devuelve SIEMPRE título y descripción larga en ambos idiomas (CA y ES), "
+    "más resumen corto bilingüe, tags genéricos bilingües, categorías del "
+    "catálogo cerrado, y el recinto canónico limpio con su tipo. Traduce con "
+    "naturalidad manteniendo nombres propios. Tags = conceptos de búsqueda, "
+    "nunca nombres propios ni el lugar. Un evento DEPORTIVO va en 'deportes' "
+    "y no lleva tag 'ocio'."
 )
 
 
 def enrich(oai, pob, ev: MergedEvent):
-    user = (f"TÍTULO (ca): {ev.titulo}\n"
-            f"DESCRIPCIÓN (ca):\n{ev.descripcion_larga}\n"
+    user = (f"TÍTULO (idioma desconocido):\n{ev.titulo}\n\n"
+            f"DESCRIPCIÓN (idioma desconocido):\n{ev.descripcion_larga}\n\n"
             f"LUGAR (crudo): {ev.lugar}\n"
             f"ORGANIZADOR: {ev.organizador_nombre}")
     d = llm_json(oai, pob, ENRICH_SYSTEM, user, ENRICHMENT_SCHEMA,
                  op="enriquecimiento", context=ev.titulo[:60])
-    ev.titulo_es = d["titulo_es"]
-    ev.desc_larga_es = d["desc_larga_es"]
+    # Canonical CA fields (persistidos como Titulo_CAT / Desc_Larga_CAT)
+    ev.titulo = (d.get("titulo_ca") or "").strip() or ev.titulo
+    ev.descripcion_larga = (d.get("desc_larga_ca") or "").strip() or ev.descripcion_larga
+    ev.titulo_es = (d.get("titulo_es") or "").strip() or ev.titulo
+    ev.desc_larga_es = (d.get("desc_larga_es") or "").strip()
     ev.desc_corta = (d.get("desc_corta_ca") or "").strip()[:500]
     ev.desc_corta_es = (d.get("desc_corta_es") or "").strip()[:500]
     ev.tags_ca = d["tags_ca"]
