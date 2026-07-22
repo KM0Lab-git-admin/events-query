@@ -1461,7 +1461,7 @@ TELEGRAM_BATCH_SCHEMA = {
                                             "encuestas, mensajes sin valor informativo."),
                         },
                         "titulo": {"type": ["string", "null"], "description": "Título corto y descriptivo deducido del mensaje (máx ~100 chars). null si DESCARTAR."},
-                        "fecha": {"type": ["string", "null"], "description": "Para EVENTO: YYYY-MM-DD de celebración si el texto la indica. null si no o si no es evento."},
+                        "fecha": {"type": ["string", "null"], "description": "Para EVENTO: YYYY-MM-DD de celebración. Resuelve relativas ('aquest dissabte','demà') respecto a la fecha de publicación del mensaje, NO respecto a hoy. null si no aparece o no es evento."},
                         "hora_inicio": {"type": ["string", "null"], "description": "HH:MM del evento si aparece."},
                         "lugar": {"type": ["string", "null"], "description": "Lugar del evento si aparece."},
                     },
@@ -2698,16 +2698,22 @@ def clasificar_mensajes_telegram(oai, pob, mensajes: list) -> list:
     today = date.today().isoformat()
     system = (
         "Clasificas mensajes del canal de Telegram de un ayuntamiento catalán. "
-        f"Hoy es {today}. Para cada mensaje numerado decide: EVENTO si anuncia "
-        "una actividad con fecha a la que se puede asistir (extrae título, "
-        "fecha YYYY-MM-DD, hora y lugar del propio texto; convierte fechas "
-        "relativas); NOTICIA si es información municipal (avisos, obras, "
+        f"Hoy (día de procesamiento) es {today}. Para cada mensaje numerado "
+        "decide: EVENTO si anuncia una actividad con fecha a la que se puede "
+        "asistir (extrae título, fecha YYYY-MM-DD, hora y lugar del propio "
+        "texto); NOTICIA si es información municipal (avisos, obras, "
         "comunicados, resultados); DESCARTAR si no aporta (saludos, reenvíos "
-        "vacíos, encuestas). No inventes fechas: null si el texto no la da."
+        "vacíos, encuestas). "
+        "CRÍTICO — fechas relativas ('aquest dissabte', 'demà', 'divendres', "
+        "'este sábado'): resuélvelas respecto a la FECHA DE PUBLICACIÓN del "
+        "mensaje (campo 'publicado'), NO respecto a hoy. Ejemplo: mensaje "
+        "publicado el miércoles 15 con 'aquest dissabte' → sábado 18, aunque "
+        "hoy sea posterior. No inventes fechas: null si el texto no la da."
     )
     partes = []
     for i, m in enumerate(mensajes):
-        partes.append(f"[{i}] ({m['fecha'] or 'sin fecha'})\n{m['texto'][:900]}")
+        pub = m["fecha"] or "desconocida"
+        partes.append(f"[{i}] publicado={pub}\n{m['texto'][:900]}")
     user = "\n\n---\n\n".join(partes)
     data = llm_json(oai, pob, system, user, TELEGRAM_BATCH_SCHEMA,
                     op="telegram", context=f"{len(mensajes)} mensajes")
