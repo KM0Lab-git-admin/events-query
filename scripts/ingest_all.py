@@ -1783,9 +1783,14 @@ def aplicar_detalle_a_candidato(oai, http, pob, cand: Candidate, detail: dict):
         cand.lugar = detail["lugar_nombre"]
     cand.direccion_fisica = detail.get("direccion_fisica") or ""
     cand.organizador_nombre = detail.get("organizador_nombre") or ""
-    if detail.get("es_gratuito") is not None:
-        cand.es_gratuito = 1 if detail["es_gratuito"] else 0
-    cand.precio_euros = detail.get("precio_euros")
+    # De pago SOLO con precio concreto > 0; sin precio (o 0) ⇒ gratuito
+    precio = detail.get("precio_euros")
+    if precio is not None and float(precio) > 0:
+        cand.precio_euros = float(precio)
+        cand.es_gratuito = 0
+    else:
+        cand.precio_euros = None
+        cand.es_gratuito = 1
     cand.link_inscripcion = detail.get("link_inscripcion") or ""
     if detail.get("imagenes_urls"):
         cand.imagenes = detail["imagenes_urls"]
@@ -1894,6 +1899,7 @@ def _build_merged_from_cluster(cluster: list, poblacion: str) -> MergedEvent:
     horarios, seen_h = [], set()
     fuentes, seen_f = [], set()
     imagenes, seen_i = [], set()
+    # De pago SOLO si hay un precio concreto > 0. precio=0/null = gratuito.
     es_gratuito = 1
     precio = None
 
@@ -1910,8 +1916,8 @@ def _build_merged_from_cluster(cluster: list, poblacion: str) -> MergedEvent:
         for u in c.imagenes:
             if u not in seen_i:
                 seen_i.add(u); imagenes.append(u)
-        if c.precio_euros is not None:
-            precio = c.precio_euros
+        if c.precio_euros is not None and float(c.precio_euros) > 0:
+            precio = float(c.precio_euros)
             es_gratuito = 0
 
     return MergedEvent(
