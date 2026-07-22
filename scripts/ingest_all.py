@@ -2551,11 +2551,25 @@ def descargar_imagen_noticia(conn, http, nid: str, noticia: Noticia,
         return None
 
 
+def flatten_news_text(text: Optional[str]) -> str:
+    """Colapsa saltos de línea/espacios (Telegram pone \\n entre emojis)."""
+    if not text:
+        return ""
+    cleaned = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    return " ".join(cleaned.split())
+
+
 def persist_noticia(conn, http, noticia: Noticia, id_ciudad: int,
                     target: IngestTarget) -> str:
     """INSERT idempotente de una noticia + su imagen. Devuelve el id."""
     nid = noticia_id(noticia.poblacion, noticia.titulo)
     fecha_pub = noticia.fecha_publicacion or date.today().isoformat()
+    titulo_ca = flatten_news_text(noticia.titulo)
+    titulo_es = flatten_news_text(noticia.titulo_es or noticia.titulo)
+    cuerpo_ca = flatten_news_text(noticia.cuerpo or "")
+    cuerpo_es = flatten_news_text(noticia.cuerpo_es or "")
+    resumen_ca = flatten_news_text(noticia.resumen) or None
+    resumen_es = flatten_news_text(noticia.resumen_es) or None
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO NOTICIAS_MASTER
@@ -2571,9 +2585,8 @@ def persist_noticia(conn, http, noticia: Noticia, id_ciudad: int,
                 Resumen_CAT=VALUES(Resumen_CAT), Resumen_ES=VALUES(Resumen_ES),
                 Tags_CAT=VALUES(Tags_CAT), Tags_ES=VALUES(Tags_ES)
         """, (nid, id_ciudad, noticia.id_fuente, noticia.fuente_url,
-              noticia.titulo, noticia.titulo_es or noticia.titulo,
-              noticia.cuerpo or "", noticia.cuerpo_es or "",
-              noticia.resumen or None, noticia.resumen_es or None,
+              titulo_ca, titulo_es, cuerpo_ca, cuerpo_es,
+              resumen_ca, resumen_es,
               json.dumps(noticia.tags_ca, ensure_ascii=False),
               json.dumps(noticia.tags_es, ensure_ascii=False),
               fecha_pub, fecha_pub, NEWS_VIGENCIA_DIAS, noticia.idioma))

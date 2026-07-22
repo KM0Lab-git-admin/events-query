@@ -34,16 +34,27 @@ def _parse_tags(raw) -> list:
         return []
 
 
+def _flatten_news_text(text: Optional[str]) -> Optional[str]:
+    """Telegram/redes meten saltos entre emojis; la API entrega el cuerpo en una sola línea."""
+    if text is None:
+        return None
+    if not isinstance(text, str):
+        return text
+    # Por si llegó escapado como dos caracteres '\'+'n'
+    cleaned = text.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n")
+    return " ".join(cleaned.split())
+
+
 def _row_to_news(row) -> Dict[str, Any]:
     return {
         "id": row[0],
         "ciudad": row[1],
-        "titulo_cat": row[2],
-        "titulo_es": row[3],
-        "cuerpo_cat": row[4],
-        "cuerpo_es": row[5],
-        "resumen_cat": row[6],
-        "resumen_es": row[7],
+        "titulo_cat": _flatten_news_text(row[2]),
+        "titulo_es": _flatten_news_text(row[3]),
+        "cuerpo_cat": _flatten_news_text(row[4]),
+        "cuerpo_es": _flatten_news_text(row[5]),
+        "resumen_cat": _flatten_news_text(row[6]),
+        "resumen_es": _flatten_news_text(row[7]),
         "tags_cat": _parse_tags(row[8]),
         "tags_es": _parse_tags(row[9]),
         "fecha_publicacion": row[10].isoformat() if row[10] else None,
