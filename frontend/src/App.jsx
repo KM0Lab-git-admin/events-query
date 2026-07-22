@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import EventsList from './EventsList'
+import NewsList from './NewsList'
 import CostsView from './CostsView'
 
 function App() {
@@ -20,6 +21,13 @@ function App() {
           </button>
           <button
             type="button"
+            className={`header-tab ${vista === 'noticias' ? 'header-tab-active' : ''}`}
+            onClick={() => setVista('noticias')}
+          >
+            Noticias
+          </button>
+          <button
+            type="button"
             className={`header-tab ${vista === 'costes' ? 'header-tab-active' : ''}`}
             onClick={() => setVista('costes')}
           >
@@ -29,7 +37,9 @@ function App() {
       </header>
 
       <main className="main-content main-content-events-only">
-        {vista === 'eventos' ? <EventsList /> : <CostsView />}
+        {vista === 'eventos' && <EventsList />}
+        {vista === 'noticias' && <NewsList />}
+        {vista === 'costes' && <CostsView />}
       </main>
     </div>
   )
