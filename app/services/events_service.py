@@ -394,6 +394,7 @@ class EventsService:
                     tags=tags,
                     url_evento=evento_raw.get('url_evento'),
                     url_imagen=evento_raw.get('url_imagen'),
+                    fuente_url_original=evento_raw.get('fuente_url_original'),
                     distancia_km=round(distancia_km, 2) if distancia_km else None,
                     similitud_score=round(evento_raw.get('similitud_score', 0.0), 3),
                     nivel_coincidencia=nivel

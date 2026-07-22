@@ -63,6 +63,7 @@ class QueryBuilder:
             em.Precio_Euros as precio_euros,
             em.Link_Entradas_Inscripcion as url_evento,
             em.Imagen_Principal_URL as url_imagen,
+            em.Fuente_URL_Original as fuente_url_original,
             CASE 
                 WHEN %s = 'es' THEN em.Tags_ES
                 ELSE em.Tags_CAT

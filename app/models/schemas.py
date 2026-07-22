@@ -107,6 +107,9 @@ class Evento(BaseModel):
     tags: List[str] = Field(default_factory=list)
     url_evento: Optional[str] = None
     url_imagen: Optional[str] = None
+    fuente_url_original: Optional[str] = Field(
+        default=None, description="URL de la fuente original de la que se extrajo el evento"
+    )
     distancia_km: Optional[float] = Field(default=None, description="Distancia desde el usuario")
     similitud_score: Optional[float] = Field(default=None, description="Score de similitud semántica")
     nivel_coincidencia: Optional[str] = Field(
