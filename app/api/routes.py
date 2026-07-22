@@ -5,7 +5,7 @@ Rutas y endpoints de la API.
 import json
 import logging
 from datetime import datetime, date
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from fastapi import APIRouter, HTTPException, status, Query
 from fastapi.responses import ORJSONResponse
 
