@@ -15,7 +15,7 @@ QUÉ HACE, EN ORDEN (modo BD)
   0. Limpieza inicial: borra eventos cuya última fecha ya pasó (con sus
      imágenes locales o remotas según --target), horarios sueltos caducados,
      y BORRA las noticias caducadas con sus binarios (vigencia =
-     NEWS_VIGENCIA_DIAS desde publicación, default 5).
+     NEWS_VIGENCIA_DIAS desde publicación, default 10).
      Con --hard-reset, antes de todo se vacían los datos de ingesta (eventos,
      noticias, binarios, recintos y estado de targets; las tablas maestras
      como CATEGORIAS/CIUDADES/BIBLIOTECA_FUENTES se conservan).
@@ -153,7 +153,7 @@ MAX_DETAIL_PAGES_PER_SOURCE = 60  # tope de seguridad de coste por link
 # publicadas dentro de la ventana, y al caducar se BORRAN físicamente de la BD
 # junto con sus binarios (imágenes en disco/remoto).
 NEWS_VIGENCIA_DIAS = int(os.getenv("NEWS_VIGENCIA_DIAS")
-                         or os.getenv("NEWS_TTL_DIAS", "5"))
+                         or os.getenv("NEWS_TTL_DIAS", "10"))
 
 # Telegram público (t.me/s/handle): paginación y ventana temporal.
 TELEGRAM_MAX_PAGINAS = 3

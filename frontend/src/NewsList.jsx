@@ -181,12 +181,20 @@ function NewsList() {
     return conScore.filter((item) => item.score > 0).map((item) => item.noticia)
   }, [noticias, busquedaTexto])
 
+  /** Telegram/redes suelen meter \n entre emojis; los colapsamos para leer en flujo continuo. */
+  const normalizarCuerpo = (texto) => {
+    if (!texto) return texto
+    return texto.replace(/\r\n|\r|\n/g, ' ').replace(/[ \t\f\v]+/g, ' ').trim()
+  }
+
   const noticiaTexto = (noticia, campo) => {
     if (campo === 'titulo') {
       return idioma === 'ca' ? (noticia.titulo_cat || noticia.titulo_es) : (noticia.titulo_es || noticia.titulo_cat)
     }
     if (campo === 'cuerpo') {
-      return idioma === 'ca' ? (noticia.cuerpo_cat || noticia.cuerpo_es) : (noticia.cuerpo_es || noticia.cuerpo_cat)
+      const raw =
+        idioma === 'ca' ? (noticia.cuerpo_cat || noticia.cuerpo_es) : (noticia.cuerpo_es || noticia.cuerpo_cat)
+      return normalizarCuerpo(raw)
     }
     if (campo === 'tags') {
       return idioma === 'ca'

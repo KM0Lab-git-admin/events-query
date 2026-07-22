@@ -1,0 +1,20 @@
+---
+description: Al recoger noticias de Malgrat (o antes de push a develop), purgar noticias con más de 10 días
+alwaysApply: true
+---
+
+# Noticias — vigencia 10 días
+
+Cuando el usuario pida **recoger / ingerir noticias de Malgrat** (o de cualquier ciudad del PoC), y **antes de hacer push a `develop`** si hay trabajo de noticias involucrado:
+
+1. **Purgar** de la BD (local y/o Railway según el target de la petición) todas las filas de `NOTICIAS_MASTER` cuya `Fecha_Publicacion` sea **anterior a hoy − 10 días** (borrar físicamente con binarios asociados).
+2. La vigencia del pipeline es `NEWS_VIGENCIA_DIAS` / `NEWS_TTL_DIAS` (default **10** en `scripts/ingest_all.py`); la purga al inicio de la ingesta (`purge_noticias_caducadas`) ya aplica esa ventana — no reducirla a menos de 10 sin pedirlo el usuario.
+3. No subir a `develop` dejando noticias antiguas (>10 días) activas en producción: si hace falta, ejecutar purga/ingesta contra Railway antes del push, o confirmar que el deploy correrá una ingesta que las borre.
+
+Criterio SQL equivalente:
+
+```sql
+DELETE FROM NOTICIAS_MASTER
+WHERE Fecha_Publicacion < DATE_SUB(CURDATE(), INTERVAL 10 DAY);
+-- (CASCADE limpia NOTICIA_BINARIOS; limpiar también imágenes en disco/remoto si aplica)
+```

@@ -1,0 +1,301 @@
+{
+  "info": {
+    "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "Events Query — Eventos & Noticias",
+    "description": "Collection para probar la API v1 de eventos y noticias.\n\n**Flujo típico:**\n1. Lista eventos o noticias\n2. Copia el `id` de un ítem\n3. Pégalo en la variable `event_id` o `news_id` y llama al detalle\n\nBase URL por defecto: producción (`eventquery.km0lab.com`). Cambia `base_url` a `http://localhost:8000` para local.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://eventquery.km0lab.com"
+    },
+    {
+      "key": "event_id",
+      "value": ""
+    },
+    {
+      "key": "news_id",
+      "value": ""
+    },
+    {
+      "key": "poblacion",
+      "value": "Malgrat de Mar"
+    },
+    {
+      "key": "cp_usuario",
+      "value": "08380"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/health",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "health"]
+            },
+            "description": "Comprueba que la API responde."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Eventos",
+      "item": [
+        {
+          "name": "Listar eventos",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.data && body.data.length > 0) {",
+                  "    pm.collectionVariables.set('event_id', body.data[0].id);",
+                  "    console.log('event_id guardado:', body.data[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events?page=1&page_size=20&poblacion={{poblacion}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events"],
+              "query": [
+                { "key": "page", "value": "1", "description": "Página (desde 1)" },
+                { "key": "page_size", "value": "20", "description": "Ítems por página (máx 100)" },
+                { "key": "poblacion", "value": "{{poblacion}}", "description": "Ej: Malgrat de Mar, Blanes" },
+                { "key": "categoria", "value": "cultura", "description": "Slug de categoría", "disabled": true },
+                { "key": "fecha_desde", "value": "2026-07-01", "description": "YYYY-MM-DD (default: hoy)", "disabled": true },
+                { "key": "fecha_hasta", "value": "2026-08-31", "description": "YYYY-MM-DD (default: hoy+30)", "disabled": true },
+                { "key": "es_gratuito", "value": "true", "description": "true | false", "disabled": true },
+                { "key": "search", "value": "musica", "description": "Búsqueda en título/tags", "disabled": true }
+              ]
+            },
+            "description": "Lista eventos activos con filtros y paginación.\n\nTras un 200, el script de Tests guarda el `id` del primer evento en `{{event_id}}` para usar en Detalle."
+          },
+          "response": []
+        },
+        {
+          "name": "Eventos de hoy",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/today",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "today"]
+            },
+            "description": "Eventos que ocurren hoy (Malgrat 08380 y Blanes 17300)."
+          },
+          "response": []
+        },
+        {
+          "name": "Eventos próximos",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/upcoming?days=7",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "upcoming"],
+              "query": [
+                { "key": "days", "value": "7", "description": "Días hacia adelante (1–30)" }
+              ]
+            },
+            "description": "Próximos N días (a partir de mañana)."
+          },
+          "response": []
+        },
+        {
+          "name": "Detalle de evento",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/events/{{event_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "events", "{{event_id}}"]
+            },
+            "description": "Detalle completo de un evento.\n\n1. Ejecuta primero **Listar eventos** (rellena `event_id` solo), o\n2. Pega manualmente el id en Variables de la collection → `event_id`."
+          },
+          "response": []
+        },
+        {
+          "name": "Categorías",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/categories",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "categories"]
+            },
+            "description": "Lista de categorías (slugs) para filtrar eventos."
+          },
+          "response": []
+        },
+        {
+          "name": "Query NL (búsqueda por texto)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pregunta\": \"¿Qué hacer este fin de semana en Malgrat?\",\n  \"cp_usuario\": \"{{cp_usuario}}\",\n  \"limit\": 10,\n  \"debug\": false\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/query",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "query"]
+            },
+            "description": "Búsqueda en lenguaje natural (IA). CP: 08380 Malgrat, 17300 Blanes."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Noticias",
+      "item": [
+        {
+          "name": "Listar noticias",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.data && body.data.length > 0) {",
+                  "    pm.collectionVariables.set('news_id', body.data[0].id);",
+                  "    console.log('news_id guardado:', body.data[0].id);",
+                  "  }",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/news?city={{poblacion}}&limit=20&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "news"],
+              "query": [
+                { "key": "city", "value": "{{poblacion}}", "description": "Nombre exacto de ciudad" },
+                { "key": "limit", "value": "20", "description": "Máx. noticias (1–100)" },
+                { "key": "offset", "value": "0", "description": "Paginación" }
+              ]
+            },
+            "description": "Noticias ACTIVAS, más recientes primero.\n\nTras un 200, guarda el `id` del primer ítem en `{{news_id}}`."
+          },
+          "response": []
+        },
+        {
+          "name": "Listar todas las noticias (sin ciudad)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/news?limit=20&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "news"],
+              "query": [
+                { "key": "limit", "value": "20" },
+                { "key": "offset", "value": "0" }
+              ]
+            },
+            "description": "Todas las noticias activas, sin filtrar por ciudad."
+          },
+          "response": []
+        },
+        {
+          "name": "Detalle de noticia",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/news/{{news_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "news", "{{news_id}}"]
+            },
+            "description": "Detalle de una noticia por `id`.\n\n1. Ejecuta primero **Listar noticias**, o\n2. Pega el id en Variables → `news_id`."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Legacy (PoC front)",
+      "description": "Endpoints legacy que usa el frontend PoC. Prefieren la API v1 para integraciones nuevas.",
+      "item": [
+        {
+          "name": "Legacy — Listar eventos",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events/list?poblacion={{poblacion}}&limit=20&offset=0",
+              "host": ["{{base_url}}"],
+              "path": ["events", "list"],
+              "query": [
+                { "key": "poblacion", "value": "{{poblacion}}" },
+                { "key": "limit", "value": "20" },
+                { "key": "offset", "value": "0" },
+                { "key": "categoria", "value": "", "disabled": true },
+                { "key": "es_gratuito", "value": "true", "disabled": true }
+              ]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Legacy — Poblaciones",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events/poblaciones",
+              "host": ["{{base_url}}"],
+              "path": ["events", "poblaciones"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Legacy — Categorías",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/events/categorias",
+              "host": ["{{base_url}}"],
+              "path": ["events", "categorias"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
