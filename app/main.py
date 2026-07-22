@@ -18,6 +18,7 @@ from app.config import settings
 from app.api.v1.router import router as v1_router
 from app.api.routes import router as legacy_router
 from app.services import db_service
+from app.services import image_store
 
 # Ruta al frontend compilado
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
@@ -62,6 +63,15 @@ async def lifespan(app: FastAPI):
         raise
 
     # Datos fake: solo con `python scripts/generate_fake_data.py` (no auto-seed al arrancar).
+
+    # Imágenes: tabla durable + hidratar disco efímero de Railway tras cada deploy
+    try:
+        await image_store.ensure_blob_table(db_service)
+        n = await image_store.hydrate_disk_from_db(db_service)
+        logger.info("✓ Almacén de imágenes listo (%s; +%d restauradas)",
+                    image_store.resolve_static_images_dir(), n)
+    except Exception as e:
+        logger.error(f"✗ Error preparando almacén de imágenes: {e}")
 
     # Verificar configuración de OpenAI
     if settings.openai_api_key:
@@ -138,20 +148,31 @@ app.include_router(v1_router)
 # Include legacy routes (backwards compatibility for PoC frontend)
 app.include_router(legacy_router, tags=["Legacy"])
 
-# Imágenes guardadas por ingesta (persist_phase_c → repo/static/images/<ID_Unico_Evento>/...)
-STATIC_IMAGES_DIR = Path(__file__).resolve().parent.parent / "static" / "images"
-if STATIC_IMAGES_DIR.is_dir():
-    app.mount(
-        "/static/images",
-        StaticFiles(directory=str(STATIC_IMAGES_DIR)),
-        name="event-images",
+# Imágenes: disco (caché / volumen) + fallback IMAGENES_BLOB en MySQL
+STATIC_IMAGES_DIR = image_store.resolve_static_images_dir()
+STATIC_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.get("/static/images/{event_id}/{filename}")
+async def serve_event_image(event_id: str, filename: str):
+    """Sirve una imagen; si falta en disco, la restaura desde IMAGENES_BLOB."""
+    err = image_store.validate_ids(event_id, filename)
+    if err:
+        return ORJSONResponse(status_code=404, content={"detail": "Image not found"})
+    try:
+        path = await image_store.ensure_on_disk(db_service, event_id, filename)
+    except Exception as exc:
+        logger.error("Error sirviendo imagen %s/%s: %s", event_id, filename, exc)
+        path = None
+    if not path or not path.is_file():
+        return ORJSONResponse(status_code=404, content={"detail": "Image not found"})
+    return FileResponse(
+        str(path),
+        media_type=image_store.content_type_for(filename),
     )
-    logger.info("✓ Montado /static/images desde %s", STATIC_IMAGES_DIR)
-else:
-    logger.warning(
-        "⚠ Carpeta %s no existe; URLs /static/images/... devolverán 404 hasta crearla (ingesta).",
-        STATIC_IMAGES_DIR,
-    )
+
+
+logger.info("✓ /static/images desde %s (con restore desde MySQL)", STATIC_IMAGES_DIR)
 
 # Middleware para logging de requests
 @app.middleware("http")

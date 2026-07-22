@@ -2,27 +2,24 @@
 Subida de imágenes de ingesta hacia el servidor (ops).
 
 Protegido por X-Ingest-Secret (= INGEST_UPLOAD_SECRET o DB_PASSWORD).
+
+Persiste en disco (caché) y en IMAGENES_BLOB (MySQL) para sobrevivir deploys.
 """
 
 from __future__ import annotations
 
 import logging
-import re
-import shutil
-from pathlib import Path
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 
 from app.config import settings
+from app.services import db_service
+from app.services import image_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["Ingest"])
 
-STATIC_IMAGES_DIR = Path(__file__).resolve().parent.parent.parent.parent / "static" / "images"
-
-EVENT_ID_RE = re.compile(r"^[a-f0-9]{64}$")
-FILENAME_RE = re.compile(r"^\d{2}_[a-f0-9]{12}\.(jpg|jpeg|png|webp)$", re.IGNORECASE)
 MAX_FILE_BYTES = 20 * 1024 * 1024
 
 
@@ -54,32 +51,27 @@ async def upload_event_image(
     request: Request,
     x_ingest_secret: str | None = Header(default=None, alias="X-Ingest-Secret"),
 ):
-    """Recibe bytes de una imagen y la guarda en static/images/{event_id}/{filename}."""
+    """Recibe bytes de una imagen y la guarda en disco + IMAGENES_BLOB."""
     _verify_secret(x_ingest_secret)
 
-    if not EVENT_ID_RE.match(event_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ID de evento inválido")
-    if not FILENAME_RE.match(filename):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nombre de archivo inválido")
+    err = image_store.validate_ids(event_id, filename)
+    if err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
 
     content = await request.body()
     if not content:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Cuerpo vacío")
     if len(content) > MAX_FILE_BYTES:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Archivo demasiado grande")
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="Archivo demasiado grande",
+        )
 
-    dest_dir = STATIC_IMAGES_DIR / event_id
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest_path = dest_dir / filename
-    dest_path.write_bytes(content)
+    await image_store.ensure_blob_table(db_service)
+    public_path = await image_store.save_image(db_service, event_id, filename, content)
+    logger.info("Imagen de ingesta guardada: %s (%d bytes)", public_path, len(content))
 
-    logger.info("Imagen de ingesta guardada: %s (%d bytes)", dest_path.relative_to(STATIC_IMAGES_DIR.parent), len(content))
-
-    return {
-        "ok": True,
-        "path": f"/static/images/{event_id}/{filename}",
-        "bytes": len(content),
-    }
+    return {"ok": True, "path": public_path, "bytes": len(content)}
 
 
 @router.delete("/images/{event_id}")
@@ -87,17 +79,14 @@ async def delete_event_images(
     event_id: str,
     x_ingest_secret: str | None = Header(default=None, alias="X-Ingest-Secret"),
 ):
-    """Elimina la carpeta static/images/{event_id} del servidor (limpieza de ingesta)."""
+    """Elimina imágenes del id en disco y en IMAGENES_BLOB."""
     _verify_secret(x_ingest_secret)
 
-    if not EVENT_ID_RE.match(event_id):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="ID de evento inválido")
+    if not image_store.EVENT_ID_RE.match(event_id):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="ID de evento inválido"
+        )
 
-    dest_dir = STATIC_IMAGES_DIR / event_id
-    removed = False
-    if dest_dir.is_dir():
-        shutil.rmtree(dest_dir)
-        removed = True
-        logger.info("Imágenes de ingesta eliminadas: %s", dest_dir.relative_to(STATIC_IMAGES_DIR.parent))
-
+    await image_store.ensure_blob_table(db_service)
+    removed = await image_store.delete_images(db_service, event_id)
     return {"ok": True, "event_id": event_id, "removed": removed}

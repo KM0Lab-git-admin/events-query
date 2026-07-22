@@ -38,6 +38,13 @@ OPENAI_API_KEY=sk-...
 ## 2) Despliegue
 
 1. Merge a la rama que Railway despliega (ej. `develop`).
+2. Railway construye con `Dockerfile` y arranca `uvicorn`.
+3. Tras el primer deploy (o tras cambiar el almacén de imágenes), sincroniza
+   bytes locales → API:
+   `python scripts/upload_images_railway.py`
+   Eso guarda en disco **y** en la tabla MySQL `IMAGENES_BLOB`. En deploys
+   siguientes el arranque rehidrata el disco desde MySQL (el filesystem del
+   contenedor es efímero).
 2. Railway auto-deploy.
 3. Revisar logs del servicio backend.
 
