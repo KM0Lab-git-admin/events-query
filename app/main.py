@@ -122,11 +122,17 @@ allowed_origins = [
     "http://localhost:3000",  # React dev
     "https://char-con-todos.lovable.app",  # Lovable publicado
     "https://preview--char-con-todos.lovable.app",  # Lovable preview
+    # Preview Vercel (rama develop / commits)
+    "https://km0lab-git-develop-albertmalleu-5824s-projects.vercel.app",
+    "https://km0lab-albertmalleu-5824s-projects.vercel.app",
 ]
 
-# Previews del editor de Lovable usan prefijos variables
-# (preview--, id-preview--...) sobre el mismo dominio del proyecto.
-allowed_origin_regex = r"https://[a-z0-9-]+--char-con-todos\.lovable\.app"
+# Previews del editor de Lovable (prefijos variables) + previews de Vercel
+# del proyecto km0lab (git-<branch>, hash de commit, etc.).
+allowed_origin_regex = (
+    r"https://[a-z0-9-]+--char-con-todos\.lovable\.app"
+    r"|https://km0lab(?:-[a-z0-9]+)*-albertmalleu-5824s-projects\.vercel\.app"
+)
 
 # In development, allow all origins
 if settings.environment == "development":
