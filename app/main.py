@@ -117,8 +117,12 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 allowed_origins = [
     "https://app.km0lab.com",
     "https://www.app.km0lab.com",
+    "https://app.uat.km0lab.com",  # UAT (Vercel develop)
+    "https://km0lab.vercel.app",
     "https://eventquery.km0lab.com",
     "http://localhost:5173",  # Vite dev
+    "http://localhost:5174",
+    "http://localhost:5175",
     "http://localhost:3000",  # React dev
     "https://char-con-todos.lovable.app",  # Lovable publicado
     "https://preview--char-con-todos.lovable.app",  # Lovable preview
@@ -127,11 +131,11 @@ allowed_origins = [
     "https://km0lab-albertmalleu-5824s-projects.vercel.app",
 ]
 
-# Previews del editor de Lovable (prefijos variables) + previews de Vercel
-# del proyecto km0lab (git-<branch>, hash de commit, etc.).
+# Previews Lovable/Vercel + Vite en cualquier puerto localhost.
 allowed_origin_regex = (
     r"https://[a-z0-9-]+--char-con-todos\.lovable\.app"
     r"|https://km0lab(?:-[a-z0-9]+)*-albertmalleu-5824s-projects\.vercel\.app"
+    r"|http://localhost:\d+"
 )
 
 # In development, allow all origins
