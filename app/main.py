@@ -119,7 +119,8 @@ allowed_origins = [
     "https://www.app.km0lab.com",
     "https://app.uat.km0lab.com",  # UAT (Vercel develop)
     "https://km0lab.vercel.app",
-    "https://eventquery.km0lab.com",
+    "https://eventquery.uat.km0lab.com",
+    "https://eventquery.km0lab.com",  # legacy / prod si se reactiva
     "http://localhost:5173",  # Vite dev
     "http://localhost:5174",
     "http://localhost:5175",

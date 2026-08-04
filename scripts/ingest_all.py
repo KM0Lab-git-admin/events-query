@@ -136,7 +136,7 @@ def set_llm_model(modelo: str):
 # a texto+enlaces). Protege de páginas monstruosas; configurable por env.
 LLM_MAX_INPUT_CHARS = int(os.getenv("LLM_MAX_INPUT_CHARS", "20000"))
 
-DEFAULT_EVENTS_API_BASE_URL = "https://eventquery.km0lab.com"
+DEFAULT_EVENTS_API_BASE_URL = "https://eventquery.uat.km0lab.com"
 
 IMAGES_DIR = Path("static") / "images"
 
@@ -301,6 +301,11 @@ def _remote_image_exists(http: httpx.Client, target: IngestTarget, storage_url: 
 
 def verify_railway_upload_access(http: httpx.Client, target: IngestTarget) -> None:
     """Falla pronto si el secret o la API de subida no están operativos."""
+    if os.getenv("INGEST_SKIP_IMAGE_UPLOAD", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    ):
+        log.warning("INGEST_SKIP_IMAGE_UPLOAD activo: no se verifica la API de imágenes")
+        return
     probe_id = "0" * 64
     probe_fn = "00_000000000000.jpg"
     url = _ingest_api_url(target, f"/api/v1/ingest/images/{probe_id}/{probe_fn}")
@@ -317,8 +322,45 @@ def verify_railway_upload_access(http: httpx.Client, target: IngestTarget) -> No
                  "igual que en Railway, o usa RAILWAY_DB_PASSWORD si coincide con DB_PASSWORD del servidor.")
     if r.status_code == 503:
         sys.exit("La API remota no tiene configurado el upload de imágenes (503).")
+    # Dominio custom mal cableado (cert/DNS → "Application not found"): seguir con BD + blobs.
+    if r.status_code == 404 and "Application not found" in (r.text or ""):
+        log.warning(
+            "API de imágenes no alcanzable en %s (404 Application not found). "
+            "Se continúa persistiendo en BD; imágenes irán a IMAGENES_BLOB. "
+            "Revisa el dominio custom en Railway/DNS.",
+            target.api_base_url,
+        )
+        return
     if r.status_code not in (200, 400, 409, 413):
         sys.exit(f"API de imágenes respondió HTTP {r.status_code}: {r.text[:200]}")
+
+
+def _upsert_imagen_blob(conn, id_unico: str, filename: str, content: bytes,
+                        content_type: Optional[str] = None) -> None:
+    """Persiste bytes en IMAGENES_BLOB (sobrevive deploys aunque falle el PUT HTTP)."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS `IMAGENES_BLOB` (
+              `ID_Unico` CHAR(64) NOT NULL,
+              `Nombre_Archivo` VARCHAR(255) NOT NULL,
+              `Contenido` LONGBLOB NOT NULL,
+              `Content_Type` VARCHAR(64) NULL,
+              `Bytes` INT NOT NULL,
+              `Actualizado` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                ON UPDATE CURRENT_TIMESTAMP,
+              PRIMARY KEY (`ID_Unico`, `Nombre_Archivo`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """)
+        cur.execute("""
+            INSERT INTO IMAGENES_BLOB
+                (ID_Unico, Nombre_Archivo, Contenido, Content_Type, Bytes)
+            VALUES (%s,%s,%s,%s,%s)
+            ON DUPLICATE KEY UPDATE
+                Contenido=VALUES(Contenido),
+                Content_Type=VALUES(Content_Type),
+                Bytes=VALUES(Bytes)
+        """, (id_unico, filename, content, content_type, len(content)))
+    conn.commit()
 
 
 def _delete_event_images_remote(http: httpx.Client, target: IngestTarget, event_id: str) -> None:
@@ -1034,7 +1076,18 @@ def purge_binarios_huerfanos(conn, target: IngestTarget, dry_run: bool) -> int:
 # ============================================================================
 
 def make_http_client():
-    return httpx.Client(timeout=HTTP_TIMEOUT, headers={"User-Agent": HTTP_USER_AGENT})
+    # Si el dominio custom sirve un cert incorrecto (p.ej. *.up.railway.app),
+    # INGEST_SSL_VERIFY=0|false desactiva la verificación solo para esta sesión.
+    verify = os.getenv("INGEST_SSL_VERIFY", "true").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+    if not verify:
+        log.warning("INGEST_SSL_VERIFY desactivado: HTTP client sin verificación TLS")
+    return httpx.Client(
+        timeout=HTTP_TIMEOUT,
+        headers={"User-Agent": HTTP_USER_AGENT},
+        verify=verify,
+    )
 
 
 def make_openai_client():
@@ -2123,7 +2176,15 @@ def descargar_imagenes(conn, http, ev: MergedEvent, pob, target: IngestTarget):
                 event_dir.mkdir(parents=True, exist_ok=True)
                 (event_dir / fname).write_bytes(content)
             else:
-                _upload_image_remote(http, target, ev.id_unico, fname, content)
+                try:
+                    _upload_image_remote(http, target, ev.id_unico, fname, content)
+                except Exception as upload_exc:
+                    log.warning(f"    Upload HTTP falló ({upload_exc}); blob en BD")
+                ctype = {"JPG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(tipo)
+                try:
+                    _upsert_imagen_blob(conn, ev.id_unico, fname, content, ctype)
+                except Exception as blob_exc:
+                    log.warning(f"    IMAGENES_BLOB falló: {blob_exc}")
             if existing:
                 continue
             local_url = f"/static/images/{ev.id_unico}/{fname}"
@@ -2170,6 +2231,10 @@ def sync_remote_binarios(conn, http: httpx.Client, target: IngestTarget, dry_run
             if not (100 < len(r.content) <= MAX_IMAGE_SIZE_BYTES):
                 raise ValueError(f"tamaño sospechoso ({len(r.content)} bytes)")
             _upload_image_remote(http, target, eid, fname, r.content)
+            try:
+                _upsert_imagen_blob(conn, eid, fname, r.content)
+            except Exception as blob_exc:
+                log.warning(f"    Sync blob BD falló {eid[:12]}…/{fname}: {blob_exc}")
             subidas += 1
         except Exception as exc:
             fallidas += 1
@@ -2534,7 +2599,15 @@ def descargar_imagen_noticia(conn, http, nid: str, noticia: Noticia,
             ndir.mkdir(parents=True, exist_ok=True)
             (ndir / fname).write_bytes(content)
         else:
-            _upload_image_remote(http, target, nid, fname, content)
+            try:
+                _upload_image_remote(http, target, nid, fname, content)
+            except Exception as upload_exc:
+                log.warning(f"    Upload HTTP noticia falló ({upload_exc}); blob en BD")
+            ctype = {"JPG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(tipo)
+            try:
+                _upsert_imagen_blob(conn, nid, fname, content, ctype)
+            except Exception as blob_exc:
+                log.warning(f"    IMAGENES_BLOB noticia falló: {blob_exc}")
         local_url = f"/static/images/{nid}/{fname}"
         with conn.cursor() as cur:
             cur.execute("""INSERT INTO NOTICIA_BINARIOS
@@ -3404,7 +3477,7 @@ def main():
                           "CODIGOS_POSTALES y BIBLIOTECA_FUENTES/SCRAPING_TARGETS."))
     ap.add_argument("--api-base-url", default=None,
                     help=("URL base de la API en producción (solo con --target railway). "
-                          "Por defecto EVENTS_API_BASE_URL o https://eventquery.km0lab.com"))
+                          "Por defecto EVENTS_API_BASE_URL o https://eventquery.uat.km0lab.com"))
     args = ap.parse_args()
     if args.modelo:
         set_llm_model(args.modelo)

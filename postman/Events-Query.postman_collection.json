@@ -2,13 +2,13 @@
   "info": {
     "_postman_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
     "name": "Events Query — Eventos & Noticias",
-    "description": "Collection para probar la API v1 de eventos y noticias.\n\n**Flujo típico:**\n1. Lista eventos o noticias\n2. Copia el `id` de un ítem\n3. Pégalo en la variable `event_id` o `news_id` y llama al detalle\n\nBase URL por defecto: producción (`eventquery.km0lab.com`). Cambia `base_url` a `http://localhost:8000` para local.",
+    "description": "Collection para probar la API v1 de eventos y noticias.\n\n**Flujo típico:**\n1. Lista eventos o noticias\n2. Copia el `id` de un ítem\n3. Pégalo en la variable `event_id` o `news_id` y llama al detalle\n\nBase URL por defecto: UAT (`eventquery.uat.km0lab.com`). Cambia `base_url` a `http://localhost:8000` para local.",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
     {
       "key": "base_url",
-      "value": "https://eventquery.km0lab.com"
+      "value": "https://eventquery.uat.km0lab.com"
     },
     {
       "key": "event_id",

@@ -6,7 +6,7 @@ Autenticación: header X-Ingest-Secret (= INGEST_UPLOAD_SECRET o RAILWAY_DB_PASS
 
 Uso:
     python scripts/upload_images_railway.py
-    python scripts/upload_images_railway.py --base-url https://eventquery.km0lab.com
+    python scripts/upload_images_railway.py --base-url https://eventquery.uat.km0lab.com
     python scripts/upload_images_railway.py --dry-run
 """
 
@@ -27,7 +27,7 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 IMAGES_DIR = ROOT / "static" / "images"
-DEFAULT_BASE_URL = "https://eventquery.km0lab.com"
+DEFAULT_BASE_URL = "https://eventquery.uat.km0lab.com"
 
 
 def load_env():

@@ -8,7 +8,7 @@ La **referencia viva** de endpoints y esquemas es Swagger (`/docs`).
 ## 🧭 Base URL
 
 - Local: `http://localhost:8000`
-- Producción (Railway): el dominio que tengas configurado (ej.: `https://eventquery.km0lab.com`)
+- UAT / Railway: `https://eventquery.uat.km0lab.com`
 
 ---
 
