@@ -404,8 +404,8 @@ async def list_events_with_filters(
         WHERE {where_sql}
         ORDER BY fecha_inicio ASC, hora_inicio ASC, em.Titulo_ES ASC
         """
-        # Nota: sin LIMIT en SQL — la agrupación por familia y la paginación se
-        # hacen en Python sobre las tarjetas resultantes (volumen actual bajo).
+        # Nota: sin LIMIT en SQL — la paginación se hace en Python (volumen actual bajo).
+        # Una tarjeta por evento (sin agrupar por ID_Familia).
 
         result = await db_service.execute_query(query, tuple(where_params))
         
@@ -485,57 +485,20 @@ async def list_events_with_filters(
             }
             eventos.append(evento)
 
-        # AGRUPACIÓN POR FAMILIA: los eventos que cuelgan de un evento paraguas
-        # (festival, fira, ciclo) comparten ID_Familia. Se devuelve UNA tarjeta
-        # por familia: la cabeza (rango de fechas más amplio; empate ->
-        # descripción más larga) con sus 'actividades' anidadas.
-        def _span_dias(e: Dict[str, Any]) -> int:
-            fechas = [h.get("fecha_inicio") for h in e.get("horarios", []) if h.get("fecha_inicio")]
-            fines = [h.get("fecha_fin") or h.get("fecha_inicio")
-                     for h in e.get("horarios", []) if h.get("fecha_inicio")]
-            if not fechas:
-                return 0
-            try:
-                d0 = date.fromisoformat(min(fechas))
-                d1 = date.fromisoformat(max(f for f in fines if f))
-                return (d1 - d0).days
-            except (ValueError, TypeError):
-                return 0
-
-        familias: Dict[str, List[Dict[str, Any]]] = {}
-        orden_familias: List[str] = []
-        for e in eventos:
-            key = e["familia"]
-            if key not in familias:
-                familias[key] = []
-                orden_familias.append(key)
-            familias[key].append(e)
-
-        tarjetas: List[Dict[str, Any]] = []
-        for key in orden_familias:
-            miembros = familias[key]
-            cabeza = max(miembros,
-                         key=lambda e: (_span_dias(e),
-                                        len(e.get("descripcion_cat") or "")))
-            actividades = [e for e in miembros if e["id"] != cabeza["id"]]
-            actividades.sort(key=lambda e: (e.get("fecha_inicio") or "",
-                                            e.get("hora_inicio") or ""))
-            cabeza["es_familia"] = bool(actividades)
-            cabeza["actividades"] = actividades
-            tarjetas.append(cabeza)
+        # Sin agrupación por familia (PoC): una tarjeta por fila de EVENTOS_MASTER.
+        tarjetas = eventos
+        for e in tarjetas:
+            e["es_familia"] = False
+            e["actividades"] = []
 
         total = len(tarjetas)
         pagina = tarjetas[offset:offset + limit]
 
         try:
             async with db_service.get_connection() as conn:
-                # imágenes de las cabezas de la página y de sus actividades
-                visibles = list(pagina)
-                for c in pagina:
-                    visibles.extend(c.get("actividades", []))
-                ids_ev = [e["id"] for e in visibles if e.get("id")]
+                ids_ev = [e["id"] for e in pagina if e.get("id")]
                 img_map = await fetch_imagenes_por_eventos(conn, ids_ev) if ids_ev else {}
-                merge_imagenes_en_eventos(visibles, img_map)
+                merge_imagenes_en_eventos(pagina, img_map)
         except Exception as img_err:
             logger.warning("BINARIOS_STORAGE no disponible o error al cargar imágenes: %s", img_err)
             for e in pagina:

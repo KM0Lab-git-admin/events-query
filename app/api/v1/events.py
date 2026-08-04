@@ -166,17 +166,11 @@ async def list_events(
 
         where_clause = " AND ".join(where_clauses)
 
-        # AGRUPACIÓN POR FAMILIA: los eventos que cuelgan de un evento paraguas
-        # (festival, fira, ciclo) comparten EVENTOS_MASTER.ID_Familia. La lista
-        # devuelve UNA tarjeta por familia: la cabeza (el miembro con el rango
-        # de fechas más amplio) con sus 'actividades' anidadas. Los eventos sin
-        # familia son su propia tarjeta. La agrupación y paginación se hacen en
-        # Python: el volumen actual (cientos de filas) lo permite de sobra; si
-        # crece a miles, mover la agrupación a SQL con window functions.
+        # AGRUPACIÓN POR FAMILIA desactivada (PoC): una tarjeta por evento.
         data_query = f"""
         SELECT
             em.ID_Unico_Evento AS id,
-            COALESCE(em.ID_Familia, em.ID_Unico_Evento) AS familia,
+            em.ID_Unico_Evento AS familia,
             em.Titulo_ES AS titulo_es,
             em.Titulo_CAT AS titulo_cat,
             COALESCE(NULLIF(em.Desc_Corta_ES, ''),
@@ -227,48 +221,16 @@ async def list_events(
                 "hora_inicio": str(row["hora_inicio"]) if row.get("hora_inicio") else None,
                 "categorias": cats,
                 "categorias_nombres": cats_nom,
+                "es_familia": False,
+                "actividades": [],
             }
-
-        def _span_dias(row: Dict[str, Any]) -> int:
-            if row.get("fecha_inicio") and row.get("fecha_fin"):
-                try:
-                    return (row["fecha_fin"] - row["fecha_inicio"]).days
-                except TypeError:
-                    return 0
-            return 0
 
         async with db_service.get_connection() as conn:
             async with conn.cursor(aiomysql.DictCursor) as cursor:
                 await cursor.execute(data_query, params)
                 rows = await cursor.fetchall() or []
 
-                # Agrupar por familia conservando el orden por fecha
-                familias: Dict[str, List[Dict[str, Any]]] = {}
-                orden_familias: List[str] = []
-                for row in rows:
-                    key = row["familia"]
-                    if key not in familias:
-                        familias[key] = []
-                        orden_familias.append(key)
-                    familias[key].append(row)
-
-                tarjetas = []
-                for key in orden_familias:
-                    miembros = familias[key]
-                    # cabeza = rango de fechas más amplio; empate -> descripción más larga
-                    cabeza_row = max(
-                        miembros,
-                        key=lambda r: (_span_dias(r),
-                                       len(r.get("descripcion_corta_cat") or "")),
-                    )
-                    cabeza = _row_to_event(cabeza_row)
-                    actividades = [
-                        _row_to_event(r) for r in miembros if r["id"] != cabeza_row["id"]
-                    ]
-                    cabeza["es_familia"] = bool(actividades)
-                    cabeza["actividades"] = actividades
-                    tarjetas.append(cabeza)
-
+                tarjetas = [_row_to_event(row) for row in rows]
                 total = len(tarjetas)
                 pagina = tarjetas[offset:offset + page_size]
 
