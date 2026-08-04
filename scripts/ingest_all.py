@@ -665,10 +665,73 @@ def event_id_from_title(poblacion: str, titulo: str) -> str:
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()
 
 
+# Tokens genéricos de agenda municipal: no sirven para detectar desalineación
+# título↔URL (p.ej. festa/major/sant/roc aparecen en casi todos los actos).
+_URL_TITLE_STOP = frozenset({
+    "festa", "major", "fiesta", "sant", "san", "roc", "roque", "malgrat",
+    "comunicacio", "comunicacion", "historic", "agenda", "noticies", "noticias",
+    "torneig", "torneo", "html", "htm", "www", "http", "https", "index",
+    "edicio", "edicion", "activitat", "actividad", "event", "evento",
+})
+
+
+def tokens_significativos(texto: str) -> set:
+    """Tokens ≥4 letras sin acentos, sin stopwords de agenda."""
+    if not texto:
+        return set()
+    raw = strip_accents(texto.lower())
+    return {t for t in re.findall(r"[a-z0-9]{4,}", raw) if t not in _URL_TITLE_STOP}
+
+
+def titulo_desalineado_con_url(titulo: str, url: str) -> bool:
+    """True si la URL y el título apuntan a actos distintos (p.ej. botifarra vs catan)."""
+    path = urlparse(url or "").path or ""
+    url_toks = tokens_significativos(path.replace("-", " ").replace("_", " ").replace(".", " "))
+    title_toks = tokens_significativos(titulo or "")
+    if not url_toks or not title_toks:
+        return False
+    solo_url = url_toks - title_toks
+    solo_titulo = title_toks - url_toks
+    return bool(solo_url and solo_titulo)
+
+
+def extraer_og_image(html: str, base_url: str) -> Optional[str]:
+    """Primera imagen usable de la página (og:image o <img> de contenido)."""
+    if not html:
+        return None
+    try:
+        soup = BeautifulSoup(html, "lxml")
+    except Exception:
+        return None
+    for prop in ("og:image", "twitter:image"):
+        tag = soup.find("meta", property=prop) or soup.find("meta", attrs={"name": prop})
+        if tag and tag.get("content"):
+            return urljoin(base_url, tag["content"].strip())
+    skip = ("logo", "icon", "sprite", "pixel", "banner", "avatar", "favicon")
+    for img in soup.find_all("img"):
+        src = (img.get("src") or img.get("data-src") or "").strip()
+        if not src or src.startswith("data:"):
+            continue
+        low = src.lower()
+        if any(s in low for s in skip):
+            continue
+        return urljoin(base_url, src)
+    return None
+
+
+def anclar_imagenes_desde_html(detail: dict, html: Optional[str], page_url: str) -> None:
+    """Si el LLM no devolvió imágenes, rellena con og:image / img del HTML."""
+    if detail.get("imagenes_urls"):
+        return
+    og = extraer_og_image(html or "", page_url)
+    if og:
+        detail["imagenes_urls"] = [og]
+        log.info(f"    Imagen anclada desde HTML (og/img): {og[:90]}")
+
+
 # ============================================================================
 # MODELOS INTERMEDIOS
 # ============================================================================
-
 @dataclass
 class Horario:
     fecha_inicio: str
@@ -1604,9 +1667,16 @@ def extract_listing(oai, pob, html_clean, listado_url):
 
 
 def extract_detail(oai, pob, html_clean, url):
-    system = ("Extractor de detalles de eventos municipales. Devuelve JSON con los "
-              "campos pedidos. No inventes datos (null si no aparecen). URLs absolutas. "
-              "Descripción: solo el texto del evento.")
+    system = (
+        "Extractor de detalles de eventos municipales. Devuelve JSON con los "
+        "campos pedidos. No inventes datos (null si no aparecen). URLs absolutas. "
+        "Descripción: solo el texto del evento. "
+        "TÍTULO: debe ser el H1/título REAL de ESTA página y coherente con el "
+        "slug de la URL (p.ej. si la URL dice 'torneig-de-botifarra', el título "
+        "debe hablar de botifarra, NO de otro acto del mismo festival). "
+        "IMÁGENES: incluye la imagen principal del contenido (og:image o foto "
+        "del acto), nunca logos ni iconos de navegación."
+    )
     user = f"URL: {url}\n\nHTML:\n{html_clean}"
     data = llm_json(oai, pob, system, user, DETAIL_SCHEMA, op="detalle", context=url)
     imgs = [urljoin(url, u) for u in (data.get("imagenes_urls") or []) if u]
@@ -1723,7 +1793,10 @@ ENRICH_SYSTEM = (
     "catálogo cerrado, y el recinto canónico limpio con su tipo. Traduce con "
     "naturalidad manteniendo nombres propios. Tags = conceptos de búsqueda, "
     "nunca nombres propios ni el lugar. Un evento DEPORTIVO va en 'deportes' "
-    "y no lleva tag 'ocio'."
+    "y no lleva tag 'ocio'. "
+    "FIDELIDAD AL ACTO: no cambies el nombre del acto ni lo sustituyas por "
+    "otro del mismo festival. Si la URL menciona un tema (p.ej. botifarra), "
+    "el título traducido debe seguir siendo ese acto."
 )
 
 
@@ -1731,13 +1804,23 @@ def enrich(oai, pob, ev: MergedEvent):
     user = (f"TÍTULO (idioma desconocido):\n{ev.titulo}\n\n"
             f"DESCRIPCIÓN (idioma desconocido):\n{ev.descripcion_larga}\n\n"
             f"LUGAR (crudo): {ev.lugar}\n"
-            f"ORGANIZADOR: {ev.organizador_nombre}")
+            f"ORGANIZADOR: {ev.organizador_nombre}\n"
+            f"URL FUENTE: {ev.fuentes[0][0] if ev.fuentes else ''}")
     d = llm_json(oai, pob, ENRICH_SYSTEM, user, ENRICHMENT_SCHEMA,
                  op="enriquecimiento", context=ev.titulo[:60])
     # Canonical CA fields (persistidos como Titulo_CAT / Desc_Larga_CAT)
-    ev.titulo = (d.get("titulo_ca") or "").strip() or ev.titulo
+    nuevo_ca = (d.get("titulo_ca") or "").strip()
+    nuevo_es = (d.get("titulo_es") or "").strip()
+    fuente_url = ev.fuentes[0][0] if ev.fuentes else ""
+    # Si el enrich inventa otro acto (desalineado con la URL), conservar el título anclado
+    if nuevo_ca and fuente_url and titulo_desalineado_con_url(nuevo_ca, fuente_url) \
+            and not titulo_desalineado_con_url(ev.titulo, fuente_url):
+        log.warning(f"    Enrich descartó título desalineado con URL: '{nuevo_ca[:60]}'")
+        nuevo_ca = ""
+        nuevo_es = ""
+    ev.titulo = nuevo_ca or ev.titulo
     ev.descripcion_larga = (d.get("desc_larga_ca") or "").strip() or ev.descripcion_larga
-    ev.titulo_es = (d.get("titulo_es") or "").strip() or ev.titulo
+    ev.titulo_es = nuevo_es or ev.titulo
     ev.desc_larga_es = (d.get("desc_larga_es") or "").strip()
     ev.desc_corta = (d.get("desc_corta_ca") or "").strip()[:500]
     ev.desc_corta_es = (d.get("desc_corta_es") or "").strip()[:500]
@@ -1787,6 +1870,7 @@ def procesar_item_evento(oai, http, pob, cp, it, listado_url, detail_cache, ctx)
 
     url_det = it.get("url_detalle")
     if url_det and same_or_sub_domain(url_det, listado_url):
+        html_det = None
         if url_det in detail_cache:
             detail = detail_cache[url_det]
         elif ctx["details_done"] >= MAX_DETAIL_PAGES_PER_SOURCE:
@@ -1802,6 +1886,7 @@ def procesar_item_evento(oai, http, pob, cp, it, listado_url, detail_cache, ctx)
                 try:
                     log.info(f"    Detalle [{ctx['details_done'] + 1}]: {titulo[:60]}")
                     detail = extract_detail(oai, pob, html_a_texto_enlaces(html_det), url_det)
+                    anclar_imagenes_desde_html(detail, html_det, url_det)
                     detail_cache[url_det] = detail
                     ctx["details_done"] += 1
                 except Exception as e:
@@ -1828,6 +1913,24 @@ def aplicar_detalle_a_candidato(oai, http, pob, cand: Candidate, detail: dict):
             aplicar_cartel_al_detalle(detail, cartel)
             log.info(f"    Cartel-OCR: datos del cartel aplicados")
 
+    # Título: la página de detalle manda sobre el listado (evita Catan vs botifarra).
+    titulo_pagina = (detail.get("titulo") or "").strip()
+    if titulo_pagina:
+        if cand.titulo and titulo_desalineado_con_url(cand.titulo, cand.fuente_url) \
+                and not titulo_desalineado_con_url(titulo_pagina, cand.fuente_url):
+            log.warning(
+                f"    Título listado desalineado con URL; uso detalle: "
+                f"'{cand.titulo[:50]}' → '{titulo_pagina[:50]}'"
+            )
+        elif cand.titulo and cand.titulo != titulo_pagina:
+            log.info(f"    Título anclado a detalle: '{titulo_pagina[:60]}'")
+        cand.titulo = titulo_pagina
+    elif cand.titulo and titulo_desalineado_con_url(cand.titulo, cand.fuente_url):
+        log.warning(
+            f"    Título listado desalineado con URL y detalle sin título: "
+            f"'{cand.titulo[:60]}' / {cand.fuente_url}"
+        )
+
     cand.descripcion_larga = detail.get("descripcion_larga") or ""
     cand.fecha_fin = detail.get("fecha_fin")
     cand.hora_inicio = cand.hora_inicio or detail.get("hora_inicio")
@@ -1845,6 +1948,7 @@ def aplicar_detalle_a_candidato(oai, http, pob, cand: Candidate, detail: dict):
         cand.precio_euros = None
         cand.es_gratuito = 1
     cand.link_inscripcion = detail.get("link_inscripcion") or ""
+    # Imágenes del detalle tienen prioridad; el listado solo rellena si faltan
     if detail.get("imagenes_urls"):
         cand.imagenes = detail["imagenes_urls"]
     # Fechas discretas: si el LLM las detectó (HTML o cartel), construir Horario
@@ -1863,7 +1967,6 @@ def aplicar_detalle_a_candidato(oai, http, pob, cand: Candidate, detail: dict):
         if cand.horarios_extra:
             cand.fecha_inicio = cand.horarios_extra[0].fecha_inicio
             cand.fecha_fin = None  # ya no es un rango continuo
-
 
 def scrape_source(oai, http, pob, cp, listado_url, dry_run,
                   existing_events=None, umbral=SIMILARITY_THRESHOLD,
@@ -3086,6 +3189,7 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
     # --- Página de detalle directa (un solo evento; típica de agregadores) ---
     if target_row["Tipo_Target"] == "WEB_DETALLE":
         detail = extract_detail(oai, pob, html_a_texto_enlaces(html), url)
+        anclar_imagenes_desde_html(detail, html, url)
         titulo = (detail.get("titulo") or "").strip()
         fecha = (detail.get("fecha_inicio") or "").strip()
         if not titulo or not (fecha or detail.get("horarios_discretos")):
