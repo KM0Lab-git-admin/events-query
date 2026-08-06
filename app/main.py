@@ -125,6 +125,9 @@ allowed_origins = [
     "http://localhost:5174",
     "http://localhost:5175",
     "http://localhost:3000",  # React dev
+    # Capacitor Android/iOS WebView (origen nativo, sin puerto)
+    "https://localhost",
+    "capacitor://localhost",
     "https://char-con-todos.lovable.app",  # Lovable publicado
     "https://preview--char-con-todos.lovable.app",  # Lovable preview
     # Preview Vercel (rama develop / commits)
