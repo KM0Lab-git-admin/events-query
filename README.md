@@ -2,6 +2,16 @@
 
 API REST para búsqueda de eventos usando lenguaje natural con inteligencia artificial.
 
+> **Estado / integración real.** Este repositorio es el snapshot **Fase 1
+> (MVP)**: expone `POST /query` y `GET /health`. El servicio desplegado que
+> consume la app KM0 LAB (host `eventquery.*.km0lab.com`) ha crecido desde
+> entonces a una **API versionada `/api/v1/*`** con eventos filtrables
+> (`/api/v1/events`, `/api/v1/events/today`, `/api/v1/events/{id}`,
+> `/api/v1/query`) y **noticias municipales** (`/api/v1/news`). Si trabajas
+> contra la versión desplegada, contrasta el contrato con `services/eventsApi.ts`
+> y `services/newsApi.ts` del repo `km0lab`. Los documentos de diseño previos a
+> la implementación están en [`ReadMes/`](ReadMes/README.md).
+
 ## 🎯 Características
 
 - **Búsqueda en lenguaje natural**: Pregunta en español o catalán
