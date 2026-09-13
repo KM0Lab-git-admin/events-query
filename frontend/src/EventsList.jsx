@@ -66,7 +66,7 @@ const TEXTOS_UI = {
     programa: 'Programa del evento',
     actividades: 'actividades',
     apiNoResponde:
-      'No hay respuesta de la API (¿arrancada en http://localhost:8000?). Revisa uvicorn y MySQL.'
+      'No hay respuesta de la API. Revisa que events-query esté en marcha y MySQL local.'
   },
   ca: {
     tituloSeccion: 'Explorar Esdeveniments',
@@ -120,7 +120,7 @@ const TEXTOS_UI = {
     programa: 'Programa de l\'esdeveniment',
     actividades: 'activitats',
     apiNoResponde:
-      'Sense resposta de l\'API (¿arrancada a http://localhost:8000?). Revisa uvicorn i MySQL.'
+      'Sense resposta de l\'API. Revisa que events-query estigui en marxa i MySQL local.'
   }
 }
 

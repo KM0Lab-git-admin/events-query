@@ -32,6 +32,9 @@ icalendar==5.0.11
 # Imágenes (persist_phase_c, dimensiones/orientación)
 Pillow>=10.4.0
 
+# Extracción de texto de PDFs (agenda Centre Cívic y similares)
+pypdf>=5.0.0
+
 # Development
 black==24.3.0
 flake8==7.0.0

@@ -14,24 +14,24 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: process.env.EVENTS_API_PROXY || 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
       '/events': {
-        target: 'http://localhost:8000',
+        target: process.env.EVENTS_API_PROXY || 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
       '/query': {
-        target: 'http://localhost:8000',
+        target: process.env.EVENTS_API_PROXY || 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
       '/health': {
-        target: 'http://localhost:8000',
+        target: process.env.EVENTS_API_PROXY || 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
       // Imágenes locales de ingesta (FastAPI sirve repo/static/images)
       '/static/images': {
-        target: 'http://localhost:8000',
+        target: process.env.EVENTS_API_PROXY || 'http://127.0.0.1:8001',
         changeOrigin: true,
       },
     }

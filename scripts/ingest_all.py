@@ -37,16 +37,18 @@ QUÉ HACE, EN ORDEN (modo BD)
      o fechas solapadas + mismo lugar) -> filtro temporal -> enriquecimiento
      (traducción, tags, categorías, recinto) -> persistencia transaccional.
   5. NOTICIAS nuevas: solo las publicadas dentro de la ventana de vigencia ->
-     detalle -> dedupe cross-fuente (título similar ±7 días) -> traducción
-     CA/ES + tags -> NOTICIAS_MASTER + NOTICIA_BINARIOS
+     detalle (cuerpo solo en memoria) -> dedupe cross-fuente -> resumen
+     bilingüe CA/ES (máx. 3 frases/párrafos cortos) + tags. En BD se
+     persiste el resumen en Cuerpo_* y Resumen_* (nunca el artículo entero).
      (Fecha_Caducidad = publicación + NEWS_VIGENCIA_DIAS).
   6. Limpieza de carpetas de imágenes huérfanas + sync de binarios remotos.
   7. Estado por target en SCRAPING_TARGETS (OK/ERROR/PAUSADO, ETag,
      fingerprint, contadores) + resumen de targets + informe de gasto LLM.
 
 Un lock-file (scripts/.ingest.lock) evita ejecuciones simultáneas del cron.
-Redes sociales IG/FB/X/YouTube: registradas en BD inactivas; conector Apify en
-fase 2. NO hace: embeddings (se generan aparte).
+Instagram: conector sin Apify (perfil público best-effort + fallback
+scripts/fuentes/instagram_media/<handle>/ con cartel-OCR multimodal).
+FB/X/YouTube: aún fase 2 (Apify). NO hace: embeddings (se generan aparte).
 
 USO
 ---
@@ -61,6 +63,7 @@ USO
     python ingest_all.py --refresh                  # ignora incremental y fingerprints
     python ingest_all.py --input fuentes.json       # modo legacy JSON plano
     python ingest_all.py --sync-images-only --target railway
+    python ingest_all.py --refresh-news-summaries --poblacion "Malgrat de Mar"
 
 FORMATO DEL JSON DE ENTRADA (legacy)
 ------------------------------------
@@ -74,7 +77,7 @@ FORMATO DEL JSON DE ENTRADA (legacy)
 
 DEPENDENCIAS
 ------------
-    pip install httpx beautifulsoup4 lxml openai pymysql Pillow python-dotenv
+    pip install httpx beautifulsoup4 lxml openai pymysql Pillow python-dotenv pypdf
 
 VARIABLES DE ENTORNO (.env)
 ---------------------------
@@ -102,7 +105,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 import pymysql
@@ -154,10 +157,25 @@ MAX_DETAIL_PAGES_PER_SOURCE = 60  # tope de seguridad de coste por link
 # junto con sus binarios (imágenes en disco/remoto).
 NEWS_VIGENCIA_DIAS = int(os.getenv("NEWS_VIGENCIA_DIAS")
                          or os.getenv("NEWS_TTL_DIAS", "10"))
+# Resumen bilingüe persistido (Cuerpo_* y Resumen_*): 3 frases / párrafos cortos.
+NEWS_RESUMEN_MAX_CHARS = 1200
 
 # Telegram público (t.me/s/handle): paginación y ventana temporal.
 TELEGRAM_MAX_PAGINAS = 3
 TELEGRAM_MAX_DIAS = 14  # no interesa histórico más antiguo
+
+# Listados web (agenda municipal, historic-agenda, calendarios Diba):
+# páginas ?pag= / ?page= y meses extra de cercaCalendari. Tope para no
+# gastar LLM en archivo de 2019.
+LISTADO_MAX_PAGINAS = int(os.getenv("LISTADO_MAX_PAGINAS", "4"))
+_PAGINA_QS_RE = re.compile(r"[?&]pag(?:e)?=(\d+)", re.I)
+_CALENDARIO_MES_RE = re.compile(r"/cercaCalendari(?:/(\d{1,2})/(\d{4}))?", re.I)
+
+# Instagram sin Apify: intento de perfil público + fallback de carteles locales.
+INSTAGRAM_MEDIA_DIR = Path(__file__).resolve().parent / "fuentes" / "instagram_media"
+INSTAGRAM_MAX_POSTS = 12
+INSTAGRAM_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+LOCAL_IMAGE_PREFIX = "localfile:"
 
 # Lock para el cron: si el fichero existe y es más joven que esto, hay otra
 # ejecución en marcha y se aborta. Más viejo = lock huérfano, se ignora.
@@ -695,8 +713,53 @@ def titulo_desalineado_con_url(titulo: str, url: str) -> bool:
     return bool(solo_url and solo_titulo)
 
 
+# Rutas típicas de cromo (logos, redes, tema) — no son la foto del acto.
+_IMG_SKIP_FRAGMENTS = (
+    "logo", "icon", "sprite", "pixel", "banner", "avatar", "favicon",
+    "/themes/", "/front/view/", "logo-diba", "header.png", "social/",
+)
+
+
+def _es_url_imagen_contenido(url: str) -> bool:
+    """True si la URL parece foto de contenido (no logo/icono/tema)."""
+    if not url or not isinstance(url, str):
+        return False
+    low = url.strip().lower()
+    if not low or low.startswith("data:"):
+        return False
+    if any(s in low for s in _IMG_SKIP_FRAGMENTS):
+        return False
+    return True
+
+
+def _mejor_src_img(img) -> str:
+    """Elige el src más fiable de un <img>. En ajmalgrat el data-src a menudo
+    es relativo corto (/noticies/...) y 404; el src real suele ir en
+    /media/repository/...."""
+    candidatos = []
+    for attr in ("src", "data-src", "data-lazy", "data-original"):
+        v = (img.get(attr) or "").strip()
+        if v:
+            candidatos.append(v)
+    srcset = (img.get("srcset") or "").strip()
+    if srcset:
+        # "url1 1x, url2 2x" → primera URL
+        first = srcset.split(",")[0].strip().split()[0]
+        if first:
+            candidatos.append(first)
+    # Preferir rutas de repositorio / media reales
+    for c in candidatos:
+        low = c.lower()
+        if "/media/" in low or "/repository/" in low:
+            return c
+    return candidatos[0] if candidatos else ""
+
+
 def extraer_og_image(html: str, base_url: str) -> Optional[str]:
-    """Primera imagen usable de la página (og:image o <img> de contenido)."""
+    """Primera imagen usable de la página (og:image o <img> de contenido).
+
+    Prioridad: og/twitter meta → <img> bajo /media|/repository → resto de
+    <img> de contenido. Ignora logos, iconos sociales y assets del tema."""
     if not html:
         return None
     try:
@@ -706,25 +769,48 @@ def extraer_og_image(html: str, base_url: str) -> Optional[str]:
     for prop in ("og:image", "twitter:image"):
         tag = soup.find("meta", property=prop) or soup.find("meta", attrs={"name": prop})
         if tag and tag.get("content"):
-            return urljoin(base_url, tag["content"].strip())
-    skip = ("logo", "icon", "sprite", "pixel", "banner", "avatar", "favicon")
+            url = urljoin(base_url, tag["content"].strip())
+            if _es_url_imagen_contenido(url):
+                return url
+    # Preferir fotos del CMS municipal
+    media_hits, otros = [], []
     for img in soup.find_all("img"):
-        src = (img.get("src") or img.get("data-src") or "").strip()
+        src = _mejor_src_img(img)
         if not src or src.startswith("data:"):
             continue
-        low = src.lower()
-        if any(s in low for s in skip):
+        url = urljoin(base_url, src)
+        if not _es_url_imagen_contenido(url):
             continue
-        return urljoin(base_url, src)
-    return None
+        low = url.lower()
+        if "/media/" in low or "/repository/" in low:
+            media_hits.append(url)
+        else:
+            otros.append(url)
+    if media_hits:
+        return media_hits[0]
+    return otros[0] if otros else None
 
 
 def anclar_imagenes_desde_html(detail: dict, html: Optional[str], page_url: str) -> None:
-    """Si el LLM no devolvió imágenes, rellena con og:image / img del HTML."""
-    if detail.get("imagenes_urls"):
-        return
+    """Ancla la imagen principal desde el HTML (og:image / img de contenido).
+
+    El LLM a veces devuelve el data-src corto de ajmalgrat (/noticies/...) que
+    da 404, o un logo. Si hay una imagen buena en el HTML, manda esa."""
     og = extraer_og_image(html or "", page_url)
-    if og:
+    if not og:
+        return
+    actual = [u for u in (detail.get("imagenes_urls") or []) if u]
+    primera = actual[0] if actual else ""
+    # Sustituir si no hay imagen, si la del LLM es basura, o si el HTML trae
+    # una de /media/repository y la del LLM no.
+    debe_anclar = (
+        not primera
+        or not _es_url_imagen_contenido(primera)
+        or (("/media/" in og.lower() or "/repository/" in og.lower())
+            and "/media/" not in primera.lower()
+            and "/repository/" not in primera.lower())
+    )
+    if debe_anclar:
         detail["imagenes_urls"] = [og]
         log.info(f"    Imagen anclada desde HTML (og/img): {og[:90]}")
 
@@ -831,8 +917,8 @@ class Noticia:
     # rellenado en enriquecimiento:
     titulo_es: str = ""
     cuerpo_es: str = ""
-    resumen: str = ""      # resumen 2-3 frases (CA) para tarjetas
-    resumen_es: str = ""   # resumen 2-3 frases (ES) para tarjetas
+    resumen: str = ""      # resumen ≤3 frases/párrafos (CA); es lo que se persiste
+    resumen_es: str = ""   # resumen ≤3 frases/párrafos (ES); es lo que se persiste
     tags_ca: list = field(default_factory=list)
     tags_es: list = field(default_factory=list)
 
@@ -1162,7 +1248,10 @@ def make_openai_client():
 def download_html(url: str, client: httpx.Client) -> str:
     r = client.get(url, follow_redirects=True)
     r.raise_for_status()
-    return r.text
+    html = respuesta_a_html_listado(url, r)
+    if not html:
+        log.warning(f"    Respuesta vacía o PDF sin texto: {url}")
+    return html or ""
 
 
 def clean_html(html: str) -> str:
@@ -1199,6 +1288,159 @@ def descargar_si_ok(url: str, client: httpx.Client) -> Optional[str]:
         return None
     except httpx.HTTPError:
         return None
+
+
+def es_url_pdf(url: str) -> bool:
+    return urlparse(url).path.lower().endswith(".pdf")
+
+
+def pdf_bytes_a_texto(data: bytes) -> str:
+    """Texto extraíble de un PDF (Centre Cívic y similares)."""
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        log.warning("    PDF ignorado: falta el paquete pypdf")
+        return ""
+    try:
+        reader = PdfReader(io.BytesIO(data))
+        partes = []
+        for page in reader.pages:
+            t = (page.extract_text() or "").strip()
+            if t:
+                partes.append(t)
+        return "\n\n".join(partes)
+    except Exception as e:
+        log.warning(f"    No se pudo leer el PDF: {e}")
+        return ""
+
+
+def respuesta_a_html_listado(url: str, response: httpx.Response) -> str:
+    """HTML de listado, o <pre> con texto si la URL es un PDF."""
+    ctype = (response.headers.get("content-type") or "").lower()
+    if es_url_pdf(url) or "application/pdf" in ctype:
+        texto = pdf_bytes_a_texto(response.content)
+        return f"<pre>{texto}</pre>" if texto.strip() else ""
+    return response.text
+
+
+def normalizar_url_listado(url: str) -> str:
+    """Ajusta listados municipales para no empezar por el archivo más antiguo.
+
+    Històric agenda: ?archive_order=DESC y año corriente.
+    Calendario Diba: /cercaCalendari/{mes}/{año} si falta el mes."""
+    p = urlparse(url)
+    path_l = (p.path or "").lower()
+    if "historic-agenda" in path_l:
+        qs = parse_qs(p.query, keep_blank_values=True)
+        flat = {k: (v[-1] if isinstance(v, list) else v) for k, v in qs.items()}
+        flat.setdefault("archive_order", "DESC")
+        flat.setdefault("archive_year", str(date.today().year))
+        return urlunparse(p._replace(query=urlencode(flat)))
+    m = _CALENDARIO_MES_RE.search(p.path or "")
+    if m and not m.group(1):
+        today = date.today()
+        new_path = (p.path or "").rstrip("/") + f"/{today.month}/{today.year}"
+        return urlunparse(p._replace(path=new_path))
+    return url
+
+
+def _num_pagina_listado(url: str) -> Optional[int]:
+    m = _PAGINA_QS_RE.search(url)
+    return int(m.group(1)) if m else None
+
+
+def urls_paginas_siguientes(html: str, base_url: str,
+                            max_paginas: int = LISTADO_MAX_PAGINAS) -> list:
+    """URLs ?pag=N / ?page=N del mismo path, páginas 2..max_paginas."""
+    if max_paginas < 2 or es_url_pdf(base_url):
+        return []
+    soup = BeautifulSoup(html, "lxml")
+    base = urlparse(base_url)
+    found = {}
+    for a in soup.find_all("a", href=True):
+        full = urljoin(base_url, a["href"])
+        p = urlparse(full)
+        if p.netloc.lower() != base.netloc.lower():
+            continue
+        if p.path.rstrip("/") != base.path.rstrip("/"):
+            continue
+        n = _num_pagina_listado(full)
+        if n is None or n < 2 or n > max_paginas:
+            continue
+        found[n] = full.split("&lang=")[0]
+    return [found[n] for n in sorted(found)]
+
+
+def urls_meses_calendario(url: str, max_meses: int = LISTADO_MAX_PAGINAS) -> list:
+    """Meses siguientes de un cercaCalendari Diba (el mes actual ya está)."""
+    m = _CALENDARIO_MES_RE.search(urlparse(url).path or "")
+    if not m or max_meses < 2:
+        return []
+    today = date.today()
+    month = int(m.group(1)) if m.group(1) else today.month
+    year = int(m.group(2)) if m.group(2) else today.year
+    extras = []
+    for _ in range(1, max_meses):
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+        extra = _CALENDARIO_MES_RE.sub(
+            f"/cercaCalendari/{month}/{year}", url, count=1)
+        if extra != url:
+            extras.append(extra)
+    return extras
+
+
+def recolectar_paginas_listado(http: httpx.Client, url: str, html: str,
+                               max_paginas: int = LISTADO_MAX_PAGINAS) -> list:
+    """[(url, html), ...] de la página actual + siguientes (paginación / meses)."""
+    paginas = [(url, html)]
+    extras = urls_paginas_siguientes(html, url, max_paginas)
+    extras.extend(urls_meses_calendario(url, max_paginas))
+    seen = {url}
+    for extra in extras:
+        if extra in seen:
+            continue
+        seen.add(extra)
+        try:
+            log.info(f"    Paginación listado: {extra}")
+            paginas.append((extra, download_html(extra, http)))
+        except httpx.HTTPError as e:
+            log.warning(f"    No se pudo descargar página extra: {e}")
+            break
+        if len(paginas) >= max_paginas:
+            break
+    if len(paginas) > 1:
+        log.info(f"    Listado: {len(paginas)} páginas descargadas")
+    return paginas
+
+
+def item_evento_ya_paso(it: dict) -> bool:
+    """True si la fecha de fin (o inicio) ISO ya es anterior a hoy."""
+    ff = (it.get("fecha_fin") or "").strip()
+    fi = (it.get("fecha_inicio") or it.get("fecha") or "").strip()
+    raw = ff or fi
+    if not raw:
+        return False
+    try:
+        return date.fromisoformat(raw[:10]) < date.today()
+    except (ValueError, TypeError):
+        return False
+
+
+def item_menciona_poblacion(it: dict, pob: str, listado_url: str) -> bool:
+    """En listados comarcales (Turisme Maresme) solo conserva el municipio."""
+    host = urlparse(listado_url).netloc.lower()
+    if "turismemaresme.cat" not in host:
+        return True
+    blob = strip_accents(" ".join([
+        it.get("titulo") or "",
+        it.get("url_detalle") or "",
+        it.get("lugar_corto") or "",
+        it.get("lugar") or "",
+    ]).lower())
+    clave = strip_accents((pob.split() or [""])[0].lower())
+    return bool(clave) and clave in blob
 
 
 def html_a_texto_enlaces(html: str) -> str:
@@ -1549,8 +1791,8 @@ NOTICIA_DETAIL_SCHEMA = {
     },
 }
 
-# Enriquecimiento de noticia: traducción bilingüe + tags. Sin categorías,
-# sin recinto, sin cartel-OCR (mucho más barato que el de eventos).
+# Enriquecimiento de noticia: título + resumen bilingüe + tags.
+# El artículo completo solo se usa como contexto; no se traduce ni se persiste.
 NOTICIA_ENRICH_SCHEMA = {
     "name": "noticia_enrichment", "strict": True,
     "schema": {
@@ -1558,13 +1800,12 @@ NOTICIA_ENRICH_SCHEMA = {
         "properties": {
             "titulo_ca": {"type": "string", "description": "Título en catalán (traduce si el original es castellano)."},
             "titulo_es": {"type": "string", "description": "Título en castellano (traduce si el original es catalán)."},
-            "cuerpo_ca": {"type": "string", "description": "Cuerpo en catalán. '' si vacío."},
-            "cuerpo_es": {"type": "string", "description": "Cuerpo en castellano. '' si vacío."},
             "resumen_ca": {
                 "type": "string",
-                "description": ("Resumen en catalán para LECTURA RÁPIDA: 2-3 frases, "
-                                "máximo ~300 caracteres, con el dato esencial de la "
-                                "noticia. NO repitas el título, sin relleno institucional."),
+                "description": ("Resumen en catalán para LECTURA: máximo 3 frases o "
+                                "3 párrafos cortos, con el dato esencial. NO repitas "
+                                "el título, sin relleno institucional, sin copiar el "
+                                "artículo entero."),
             },
             "resumen_es": {"type": "string", "description": "El mismo resumen en castellano."},
             "tags_ca": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 8,
@@ -1572,7 +1813,7 @@ NOTICIA_ENRICH_SCHEMA = {
             "tags_es": {"type": "array", "items": {"type": "string"}, "minItems": 3, "maxItems": 8,
                         "description": "Mismos tags en castellano, mismo orden."},
         },
-        "required": ["titulo_ca", "titulo_es", "cuerpo_ca", "cuerpo_es",
+        "required": ["titulo_ca", "titulo_es",
                      "resumen_ca", "resumen_es", "tags_ca", "tags_es"],
         "additionalProperties": False,
     },
@@ -1708,18 +1949,20 @@ def extract_cartel(oai, pob, http, image_url: str, today_iso: str) -> Optional[d
     estructurados. Devuelve None si la imagen no se puede descargar o el
     modelo dice que no tiene texto útil."""
     try:
-        # Descargar la imagen y convertirla a base64 para la API multimodal
-        r = http.get(image_url, follow_redirects=True)
-        r.raise_for_status()
         import base64
-        img_b64 = base64.b64encode(r.content).decode("ascii")
-        # detectar mime básico
-        ct = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
-        if not ct.startswith("image/"):
+        content = _leer_bytes_imagen(http, image_url)
+        img_b64 = base64.b64encode(content).decode("ascii")
+        # mime básico por extensión / magic
+        lower = image_url.lower()
+        if ".png" in lower.split("?")[0]:
+            ct = "image/png"
+        elif ".webp" in lower.split("?")[0]:
+            ct = "image/webp"
+        else:
             ct = "image/jpeg"
         data_url = f"data:{ct};base64,{img_b64}"
     except Exception as e:
-        log.warning(f"    Cartel-OCR: no se pudo descargar imagen ({e})")
+        log.warning(f"    Cartel-OCR: no se pudo leer imagen ({e})")
         return None
 
     system = (
@@ -1977,6 +2220,7 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
     descargar. confirmaciones: lista mutable donde se anotan (id_evento, url)
     de los omitidos por ya existir, para registrar la fuente en EVENTO_FUENTES."""
     existing_events = existing_events or []
+    listado_url = normalizar_url_listado(listado_url)
     log.info(f"  Link: {listado_url}")
     if listing_html is None:
         try:
@@ -1984,47 +2228,58 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
         except httpx.HTTPError as e:
             log.error(f"    No se pudo descargar el listado: {e}")
             return []
+    if not listing_html:
+        return []
 
-    html_clean = html_a_texto_enlaces(listing_html)
-    log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars texto+enlaces)...")
-    items = extract_listing(oai, pob, html_clean, listado_url)
-    log.info(f"    {len(items)} eventos en el listado")
-
+    paginas = recolectar_paginas_listado(http, listado_url, listing_html)
     candidates = []
     detail_cache = {}
     ctx = {"details_done": 0}
-    omitidos = 0  # ya existentes en BD: no se reprocesan (ahorro de coste)
+    omitidos = 0
+    omitidos_pasados = 0
 
-    for it in items:
+    for page_url, page_html in paginas:
         if max_nuevos is not None and len(candidates) >= max_nuevos:
-            log.info(f"    Límite de prueba alcanzado ({max_nuevos} items nuevos): "
-                     f"resto del listado omitido")
             break
-        titulo = (it.get("titulo") or "").strip()
-        fecha_inicio = (it.get("fecha_inicio") or "").strip()
-        if not titulo or not fecha_inicio:
-            continue
+        html_clean = html_a_texto_enlaces(page_html)
+        log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars "
+                 f"texto+enlaces) {page_url}")
+        items = extract_listing(oai, pob, html_clean, page_url)
+        log.info(f"    {len(items)} eventos en el listado")
 
-        # Ingesta incremental: si el evento ya está en la BD (mismo título o
-        # suficientemente similar en esta población), se omite por completo: no
-        # se baja el detalle, no se lee el cartel, no se enriquece ni se
-        # descargan imágenes. Es el grueso del ahorro de coste por ejecución.
-        if not refresh:
-            existente = buscar_evento_existente(titulo, existing_events, umbral,
-                                                it.get("lugar_corto") or "",
-                                                fecha_inicio)
-            if existente:
-                omitidos += 1
-                if confirmaciones is not None:
-                    confirmaciones.append(
-                        (existente["id"], it.get("url_detalle") or listado_url))
+        for it in items:
+            if max_nuevos is not None and len(candidates) >= max_nuevos:
+                log.info(f"    Límite de prueba alcanzado ({max_nuevos} items nuevos): "
+                         f"resto del listado omitido")
+                break
+            titulo = (it.get("titulo") or "").strip()
+            fecha_inicio = (it.get("fecha_inicio") or "").strip()
+            if not titulo or not fecha_inicio:
+                continue
+            if not item_menciona_poblacion(it, pob, page_url):
+                continue
+            if item_evento_ya_paso(it):
+                omitidos_pasados += 1
                 continue
 
-        candidates.append(
-            procesar_item_evento(oai, http, pob, cp, it, listado_url, detail_cache, ctx))
+            if not refresh:
+                existente = buscar_evento_existente(
+                    titulo, existing_events, umbral,
+                    it.get("lugar_corto") or "", fecha_inicio)
+                if existente:
+                    omitidos += 1
+                    if confirmaciones is not None:
+                        confirmaciones.append(
+                            (existente["id"], it.get("url_detalle") or page_url))
+                    continue
 
-    if omitidos:
+            candidates.append(
+                procesar_item_evento(oai, http, pob, cp, it, page_url,
+                                     detail_cache, ctx))
+
+    if omitidos or omitidos_pasados:
         log.info(f"    Omitidos por ya existir en BD: {omitidos} · "
+                 f"fecha pasada: {omitidos_pasados} · "
                  f"nuevos a procesar: {len(candidates)}")
     return candidates
 
@@ -2093,8 +2348,21 @@ def _mismo_evento(rep: Candidate, c: Candidate, umbral: float) -> bool:
       1. Títulos similares (>= umbral), o
       2. Fechas solapadas + mismo lugar normalizado (no vacío). Cubre el caso
          de fuentes que titulan distinto el mismo evento ('Concert FM' vs
-         'Gran concert de Festa Major') pero coinciden en cuándo y dónde."""
+         'Gran concert de Festa Major') pero coinciden en cuándo y dónde.
+
+    Excepción: títulos solo moderadamente parecidos Y fechas que no solapan
+    (p.ej. 'Laboratori de Contes' 17-18 vs \"Laboratori d'Històries\" 19-20)
+    no se fusionan; hace falta similitud >= 0.95 o solape temporal."""
     if titulos_similares(rep.titulo, c.titulo, umbral):
+        try:
+            if rep.fecha_inicio and c.fecha_inicio:
+                date.fromisoformat(rep.fecha_inicio)
+                date.fromisoformat(c.fecha_inicio)
+                if not fechas_solapan(rep, c) and not titulos_similares(
+                        rep.titulo, c.titulo, max(umbral, 0.95)):
+                    return False
+        except (ValueError, TypeError):
+            pass
         return True
     lugar_rep = normalize_place(rep.lugar)
     lugar_c = normalize_place(c.lugar)
@@ -2139,15 +2407,28 @@ def fusionar(candidates: list, umbral: float = SIMILARITY_THRESHOLD) -> list:
     return merged
 
 
+def _fecha_horario_valida(h) -> Optional[date]:
+    """Fecha de fin (o inicio) parseable ISO; None si falta o no vale."""
+    raw = (h.fecha_fin or h.fecha_inicio or "")
+    if not isinstance(raw, str):
+        raw = str(raw) if raw else ""
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except (ValueError, TypeError):
+        return None
+
+
 def filtrar_futuro(ev: MergedEvent) -> bool:
-    """Conserva solo horarios de hoy o futuros. Devuelve False si no queda ninguno."""
+    """Conserva solo horarios de hoy o futuros con fecha ISO. Descarta
+    filas con fecha vacía (evitaban persistir: Incorrect date value '')."""
     today = date.today()
     vivos = []
     for h in ev.horarios:
-        try:
-            fin = date.fromisoformat(h.fecha_fin) if h.fecha_fin else date.fromisoformat(h.fecha_inicio)
-        except (ValueError, TypeError):
-            vivos.append(h)  # fecha rara: conservar para no perder
+        fin = _fecha_horario_valida(h)
+        if fin is None:
             continue
         if fin >= today:
             vivos.append(h)
@@ -2247,6 +2528,50 @@ def _imagen_ya_disponible(target: IngestTarget, http: httpx.Client, eid: str,
     return _remote_image_exists(http, target, storage_url)
 
 
+def _leer_bytes_imagen(http, url: str) -> bytes:
+    """Lee bytes de una URL http(s) o de una ruta local (prefijo localfile:)."""
+    if url.startswith(LOCAL_IMAGE_PREFIX):
+        path = Path(url[len(LOCAL_IMAGE_PREFIX):])
+        if not path.is_file():
+            raise FileNotFoundError(f"imagen local no encontrada: {path}")
+        return path.read_bytes()
+    r = http.get(url, follow_redirects=True)
+    r.raise_for_status()
+    return r.content
+
+
+def _comprimir_imagen_si_hace_falta(content: bytes,
+                                   max_bytes: int = MAX_IMAGE_SIZE_BYTES) -> bytes:
+    """Si la imagen supera el tope (p.ej. PNG municipal de 22MB), reencodea a
+    JPEG redimensionado para poder persistirla. Si ya cabe, la deja igual."""
+    if 100 < len(content) <= max_bytes:
+        return content
+    if len(content) <= 100:
+        raise ValueError(f"tamaño sospechoso ({len(content)} bytes)")
+    img = Image.open(io.BytesIO(content))
+    img.load()
+    if img.mode not in ("RGB", "L"):
+        img = img.convert("RGB")
+    elif img.mode == "L":
+        img = img.convert("RGB")
+    # Reducir lado mayor hasta caber bajo el tope
+    max_lado = 2400
+    for quality in (85, 75, 65, 55):
+        w, h = img.size
+        scale = min(1.0, max_lado / max(w, h))
+        work = img.resize((max(1, int(w * scale)), max(1, int(h * scale))),
+                          Image.Resampling.LANCZOS) if scale < 1 else img
+        buf = io.BytesIO()
+        work.save(buf, format="JPEG", quality=quality, optimize=True)
+        out = buf.getvalue()
+        if len(out) <= max_bytes:
+            log.info(f"    Imagen recomprimida a JPEG q{quality} "
+                     f"{len(content):,}→{len(out):,} bytes")
+            return out
+        max_lado = int(max_lado * 0.75)
+    raise ValueError(f"tamaño sospechoso tras comprimir ({len(out)} bytes)")
+
+
 def descargar_imagenes(conn, http, ev: MergedEvent, pob, target: IngestTarget):
     for orden, url in enumerate(ev.imagenes):
         with conn.cursor() as cur:
@@ -2262,8 +2587,7 @@ def descargar_imagenes(conn, http, ev: MergedEvent, pob, target: IngestTarget):
         ):
             continue
         try:
-            r = http.get(url, follow_redirects=True); r.raise_for_status()
-            content = r.content
+            content = _comprimir_imagen_si_hace_falta(_leer_bytes_imagen(http, url))
             if not (100 < len(content) <= MAX_IMAGE_SIZE_BYTES):
                 raise ValueError(f"tamaño sospechoso ({len(content)} bytes)")
             img = Image.open(io.BytesIO(content)); img.verify()
@@ -2345,6 +2669,120 @@ def sync_remote_binarios(conn, http: httpx.Client, target: IngestTarget, dry_run
     log.info(f"Sincronización imágenes Railway: {ok} ya OK, {subidas} subidas, {fallidas} fallidas")
 
 
+def backfill_imagenes_faltantes(conn, http: httpx.Client, target: IngestTarget,
+                                dry_run: bool = False,
+                                url_contains: Optional[str] = None,
+                                solo_poblacion: Optional[str] = None) -> int:
+    """Eventos sin binario: relee Fuente_URL_Original, extrae og:image/img CMS
+    y descarga/sube. Cubre casos donde el LLM dejó un data-src 404 y el anclado
+    antiguo no lo corrigió."""
+    sql = """
+        SELECT e.ID_Unico_Evento, e.Poblacion_Nombre, e.CP_Evento,
+               e.Fuente_URL_Original, e.Titulo_CAT
+        FROM EVENTOS_MASTER e
+        WHERE e.Fuente_URL_Original IS NOT NULL AND e.Fuente_URL_Original != ''
+          AND NOT EXISTS (
+              SELECT 1 FROM BINARIOS_STORAGE b
+              WHERE b.ID_Unico_Evento = e.ID_Unico_Evento
+          )
+    """
+    params = []
+    if solo_poblacion:
+        sql += " AND e.Poblacion_Nombre = %s"
+        params.append(solo_poblacion)
+    if url_contains:
+        sql += " AND e.Fuente_URL_Original LIKE %s"
+        params.append(f"%{url_contains}%")
+    sql += " ORDER BY e.Poblacion_Nombre, e.Titulo_CAT"
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        rows = cur.fetchall()
+    if not rows:
+        log.info("Backfill imágenes: no hay eventos sin binario que encajen")
+        return 0
+    log.info(f"Backfill imágenes: {len(rows)} eventos sin imagen "
+             f"({target.name}"
+             + (f", url~{url_contains}" if url_contains else "")
+             + ")")
+    ok = 0
+    for row in rows:
+        eid = row["ID_Unico_Evento"]
+        fuente = row["Fuente_URL_Original"]
+        titulo = row["Titulo_CAT"] or eid[:12]
+        try:
+            r = http.get(fuente, follow_redirects=True, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            img_url = extraer_og_image(r.text, fuente)
+            if not img_url:
+                log.warning(f"  Sin imagen en HTML: {titulo[:50]} — {fuente[:70]}")
+                continue
+            log.info(f"  {titulo[:50]} ← {img_url[:90]}")
+            if dry_run:
+                ok += 1
+                continue
+            ev = MergedEvent(
+                id_unico=eid,
+                poblacion=row["Poblacion_Nombre"] or "",
+                cp=row.get("CP_Evento") or "",
+                titulo=titulo,
+                lugar="",
+                descripcion_larga="",
+                direccion_fisica="",
+                organizador_nombre="",
+                es_gratuito=1,
+                precio_euros=None,
+                link_inscripcion="",
+                imagenes=[img_url],
+            )
+            descargar_imagenes(conn, http, ev, ev.poblacion, target)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT URL_Almacenamiento_Nube FROM BINARIOS_STORAGE
+                    WHERE ID_Unico_Evento=%s AND Es_Principal=1 LIMIT 1
+                """, (eid,))
+                binario = cur.fetchone()
+                if binario:
+                    cur.execute(
+                        "UPDATE EVENTOS_MASTER SET Imagen_Principal_URL=%s "
+                        "WHERE ID_Unico_Evento=%s",
+                        (binario["URL_Almacenamiento_Nube"], eid))
+                    ok += 1
+                else:
+                    log.warning(f"  No se persistió binario para {titulo[:50]}")
+            conn.commit()
+        except Exception as e:
+            log.error(f"  Backfill falló {titulo[:50]}: {e}")
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+    log.info(f"Backfill imágenes: {ok}/{len(rows)} OK en {target.name}")
+    return ok
+
+
+def run_backfill_images(target_name: str = "railway", api_base_url: Optional[str] = None,
+                        dry_run: bool = False, url_contains: Optional[str] = None,
+                        solo_poblacion: Optional[str] = None) -> None:
+    """CLI: rellena imágenes faltantes de eventos ya en BD."""
+    nombres = ("local", "railway") if target_name == "both" else (target_name,)
+    http = make_http_client()
+    try:
+        for nombre in nombres:
+            tgt = resolve_ingest_target(nombre, api_base_url)
+            conn = get_connection(tgt)
+            try:
+                log.info(f"Destino backfill: {tgt.name} -> {tgt.db_host}:{tgt.db_port}/{tgt.db_name}")
+                if not tgt.store_images_locally:
+                    verify_railway_upload_access(http, tgt)
+                backfill_imagenes_faltantes(
+                    conn, http, tgt, dry_run=dry_run,
+                    url_contains=url_contains, solo_poblacion=solo_poblacion)
+            finally:
+                conn.close()
+    finally:
+        http.close()
+
+
 def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
                   fuente_cache, dry_run, target: IngestTarget):
     coords = coords_cache.get(ev.poblacion, {"lat": 41.6, "lng": 2.7})
@@ -2398,15 +2836,35 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
             ev.link_inscripcion or None,
         ))
 
-    # HORARIOS (delete + insert)
+    # HORARIOS (delete + insert). Sin fecha ISO no se inserta (MySQL 1292).
+    horarios_ok = []
+    for h in ev.horarios:
+        fi = (h.fecha_inicio or "").strip()
+        if not fi:
+            log.warning(f"    Horario sin fecha_inicio, omitido: {ev.titulo[:50]}")
+            continue
+        try:
+            date.fromisoformat(fi[:10])
+        except (ValueError, TypeError):
+            log.warning(f"    Horario con fecha inválida {fi!r}, omitido: {ev.titulo[:50]}")
+            continue
+        ff = (h.fecha_fin or "").strip() or None
+        if ff:
+            try:
+                date.fromisoformat(ff[:10])
+            except (ValueError, TypeError):
+                ff = None
+        horarios_ok.append((fi[:10], ff[:10] if ff else None,
+                            h.hora_inicio or None, h.hora_fin or None))
+    if not horarios_ok:
+        raise ValueError(f"sin horarios válidos para persistir: {ev.titulo[:60]}")
     with conn.cursor() as cur:
         cur.execute("DELETE FROM EVENTO_HORARIOS WHERE ID_Unico_Evento=%s", (ev.id_unico,))
-        for h in ev.horarios:
+        for fi, ff, hi, hf in horarios_ok:
             cur.execute("""INSERT INTO EVENTO_HORARIOS
                 (ID_Unico_Evento, Fecha_Inicio, Fecha_Fin, Hora_Inicio, Hora_Fin, Es_Recurrente)
                 VALUES (%s,%s,%s,%s,%s,0)""",
-                (ev.id_unico, h.fecha_inicio, h.fecha_fin or None,
-                 h.hora_inicio or None, h.hora_fin or None))
+                (ev.id_unico, fi, ff, hi, hf))
 
     # CATEGORIAS (delete + insert)
     with conn.cursor() as cur:
@@ -2443,7 +2901,8 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
 # TARGETS DESDE BD: selección, detección de cambios y estado
 # ============================================================================
 
-def load_targets_from_db(conn, solo_poblacion: Optional[str] = None) -> list:
+def load_targets_from_db(conn, solo_poblacion: Optional[str] = None,
+                         url_contains: Optional[str] = None) -> list:
     """Targets activos desde SCRAPING_TARGETS + BIBLIOTECA_FUENTES + CIUDADES.
     Devuelve dicts con todo lo necesario para procesar y actualizar cada target,
     ordenados por población y prioridad de fuente."""
@@ -2465,6 +2924,9 @@ def load_targets_from_db(conn, solo_poblacion: Optional[str] = None) -> list:
     if solo_poblacion:
         sql += " AND c.Nombre = %s"
         params.append(solo_poblacion)
+    if url_contains:
+        sql += " AND t.URL_Target LIKE %s"
+        params.append(f"%{url_contains}%")
     sql += " ORDER BY c.Nombre, f.Prioridad, t.ID_Target"
     with conn.cursor() as cur:
         cur.execute(sql, params)
@@ -2496,7 +2958,7 @@ def fetch_si_cambiado(http: httpx.Client, target_row: dict, refresh: bool):
 
     Devuelve (html | None, meta) donde meta = {etag, last_modified, fingerprint,
     cambio: bool}. html=None significa 'sin cambios' (no es un error)."""
-    url = target_row["URL_Target"]
+    url = normalizar_url_listado(target_row["URL_Target"])
     headers = {}
     if not refresh:
         if target_row.get("Http_ETag"):
@@ -2513,8 +2975,8 @@ def fetch_si_cambiado(http: httpx.Client, target_row: dict, refresh: bool):
                       "cambio": False}
     r.raise_for_status()
 
-    html = r.text
-    fingerprint = content_fingerprint(html)
+    html = respuesta_a_html_listado(url, r)
+    fingerprint = content_fingerprint(html) if html else ""
     meta = {"etag": r.headers.get("etag"),
             "last_modified": r.headers.get("last-modified"),
             "fingerprint": fingerprint, "cambio": True}
@@ -2655,24 +3117,28 @@ def extraer_noticia(oai, pob, html_clean, url) -> dict:
 
 
 def enriquecer_noticia(oai, noticia: Noticia):
-    """Traducción bilingüe CA/ES + tags. Una sola llamada por noticia nueva."""
+    """Título bilingüe + resumen CA/ES (máx. 3 frases/párrafos) + tags.
+    El cuerpo extraído solo se usa como contexto; no se persiste entero."""
     system = ("Enriqueces noticias municipales catalanas. Devuelve JSON con el "
-              "título y cuerpo en catalán Y castellano (traduce el que falte, "
-              "manteniendo nombres propios) y tags genéricos bilingües de "
-              "búsqueda (temática, ámbito; nunca nombres propios).")
+              "título en catalán y castellano y un RESUMEN breve en ambos "
+              "idiomas (máximo 3 frases o 3 párrafos cortos; no copies el "
+              "artículo). Tags genéricos bilingües de búsqueda (temática, "
+              "ámbito; nunca nombres propios).")
     user = (f"IDIOMA ORIGEN: {noticia.idioma}\n"
             f"TÍTULO: {noticia.titulo}\n"
-            f"CUERPO:\n{noticia.cuerpo[:6000]}")
+            f"ARTÍCULO (solo contexto; resume, no lo copies):\n"
+            f"{noticia.cuerpo[:6000]}")
     d = llm_json(oai, noticia.poblacion, system, user, NOTICIA_ENRICH_SCHEMA,
                  op="noticia_enrich", context=noticia.titulo[:60])
-    # El título/cuerpo "canónicos" (CAT) se sustituyen por la versión del LLM
-    # para tener siempre ambos idiomas consistentes.
     noticia.titulo = d["titulo_ca"] or noticia.titulo
-    noticia.cuerpo = d["cuerpo_ca"] or noticia.cuerpo
     noticia.titulo_es = d["titulo_es"] or noticia.titulo
-    noticia.cuerpo_es = d["cuerpo_es"] or noticia.cuerpo
-    noticia.resumen = (d.get("resumen_ca") or "").strip()[:500]
-    noticia.resumen_es = (d.get("resumen_es") or "").strip()[:500]
+    resumen_ca = (d.get("resumen_ca") or "").strip()[:NEWS_RESUMEN_MAX_CHARS]
+    resumen_es = (d.get("resumen_es") or "").strip()[:NEWS_RESUMEN_MAX_CHARS]
+    noticia.resumen = resumen_ca
+    noticia.resumen_es = resumen_es
+    # Lo persistido es el resumen; el artículo extraído no se guarda.
+    noticia.cuerpo = resumen_ca
+    noticia.cuerpo_es = resumen_es
     noticia.tags_ca = d["tags_ca"]
     noticia.tags_es = d["tags_es"]
 
@@ -2685,8 +3151,7 @@ def descargar_imagen_noticia(conn, http, nid: str, noticia: Noticia,
     if not url:
         return None
     try:
-        r = http.get(url, follow_redirects=True); r.raise_for_status()
-        content = r.content
+        content = _comprimir_imagen_si_hace_falta(_leer_bytes_imagen(http, url))
         if not (100 < len(content) <= MAX_IMAGE_SIZE_BYTES):
             raise ValueError(f"tamaño sospechoso ({len(content)} bytes)")
         img = Image.open(io.BytesIO(content)); img.verify()
@@ -2742,10 +3207,15 @@ def persist_noticia(conn, http, noticia: Noticia, id_ciudad: int,
     fecha_pub = noticia.fecha_publicacion or date.today().isoformat()
     titulo_ca = flatten_news_text(noticia.titulo)
     titulo_es = flatten_news_text(noticia.titulo_es or noticia.titulo)
-    cuerpo_ca = flatten_news_text(noticia.cuerpo or "")
-    cuerpo_es = flatten_news_text(noticia.cuerpo_es or "")
-    resumen_ca = flatten_news_text(noticia.resumen) or None
-    resumen_es = flatten_news_text(noticia.resumen_es) or None
+    resumen_ca = flatten_news_text(noticia.resumen) or flatten_news_text(noticia.cuerpo)
+    resumen_es = (flatten_news_text(noticia.resumen_es)
+                  or flatten_news_text(noticia.cuerpo_es)
+                  or resumen_ca)
+    # Cuerpo_* = resumen: la BD no guarda el artículo entero.
+    cuerpo_ca = resumen_ca
+    cuerpo_es = resumen_es
+    resumen_ca = resumen_ca or None
+    resumen_es = resumen_es or None
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO NOTICIAS_MASTER
@@ -2822,6 +3292,15 @@ def procesar_item_noticia(oai, http, pob, it, listado_url) -> Optional[Noticia]:
             noticia.idioma = detail.get("idioma") or "ca"
             if detail.get("imagen_url"):
                 noticia.imagen_url = detail["imagen_url"]
+            # Anclar og:image / foto CMS si el LLM no trajo imagen usable
+            og = extraer_og_image(html_det, url_det)
+            if og and (not noticia.imagen_url
+                       or not _es_url_imagen_contenido(noticia.imagen_url)
+                       or (("/media/" in og.lower() or "/repository/" in og.lower())
+                           and "/media/" not in noticia.imagen_url.lower()
+                           and "/repository/" not in noticia.imagen_url.lower())):
+                noticia.imagen_url = og
+                log.info(f"    Noticia: imagen anclada desde HTML: {og[:90]}")
         except Exception as e:
             log.error(f"    Error en detalle de noticia {url_det}: {e}")
     return noticia
@@ -3026,6 +3505,401 @@ def procesar_target_telegram(oai, http, target_row: dict, existing_events: list,
 
 
 # ============================================================================
+# CONECTOR INSTAGRAM (sin Apify: perfil público best-effort + carteles locales)
+# ============================================================================
+
+INSTAGRAM_CARTELES_SCHEMA = {
+    "name": "instagram_carteles", "strict": True,
+    "schema": {
+        "type": "object",
+        "properties": {
+            "eventos": {
+                "type": "array",
+                "description": (
+                    "Uno por cada actividad anunciada en el/los carteles. "
+                    "Si una imagen es un collage con varios carteles, "
+                    "devuelve un evento por cartel."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "titulo": {"type": "string"},
+                        "fecha_inicio": {
+                            "type": ["string", "null"],
+                            "description": "YYYY-MM-DD. Null si no aparece.",
+                        },
+                        "fecha_fin": {
+                            "type": ["string", "null"],
+                            "description": "YYYY-MM-DD si es un rango continuo.",
+                        },
+                        "hora_inicio": {"type": ["string", "null"]},
+                        "hora_fin": {"type": ["string", "null"]},
+                        "horarios_discretos": {
+                            "type": "array",
+                            "description": (
+                                "Sesiones en días concretos (ej. 19 y 20 d'agost). "
+                                "Vacío si es un solo día o un rango continuo."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "fecha": {"type": "string"},
+                                    "hora_inicio": {"type": ["string", "null"]},
+                                    "hora_fin": {"type": ["string", "null"]},
+                                },
+                                "required": ["fecha", "hora_inicio", "hora_fin"],
+                                "additionalProperties": False,
+                            },
+                        },
+                        "lugar": {"type": ["string", "null"]},
+                        "es_gratuito": {"type": ["boolean", "null"]},
+                        "precio_euros": {"type": ["number", "null"]},
+                        "organizador": {"type": ["string", "null"]},
+                        "descripcion": {
+                            "type": ["string", "null"],
+                            "description": "Resumen del cartel (público, inscripción…).",
+                        },
+                    },
+                    "required": [
+                        "titulo", "fecha_inicio", "fecha_fin", "hora_inicio",
+                        "hora_fin", "horarios_discretos", "lugar", "es_gratuito",
+                        "precio_euros", "organizador", "descripcion",
+                    ],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["eventos"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _instagram_mime(path_or_url: str) -> str:
+    lower = path_or_url.lower().split("?")[0]
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith(".webp"):
+        return "image/webp"
+    return "image/jpeg"
+
+
+def instagram_fetch_posts_public(http: httpx.Client, handle: str,
+                                 max_posts: int = INSTAGRAM_MAX_POSTS) -> list:
+    """Intenta leer posts públicos del perfil sin Apify ni login.
+
+    Meta suele devolver 429 / login wall; en ese caso devuelve []. Cada post:
+    {id, imagen_url, caption, fecha}.
+    """
+    handle = (handle or "").strip().lstrip("@")
+    if not handle:
+        return []
+    profile = f"https://www.instagram.com/{handle}/"
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Referer": "https://www.instagram.com/",
+    }
+    posts = []
+
+    # 1) Endpoint web_profile_info (a menudo bloqueado sin cookies)
+    try:
+        api = "https://i.instagram.com/api/v1/users/web_profile_info/"
+        r = http.get(api, params={"username": handle},
+                     headers={**headers, "X-IG-App-ID": "936619743392459"},
+                     follow_redirects=True)
+        if r.status_code == 200:
+            data = r.json()
+            edges = (((data.get("data") or {}).get("user") or {})
+                     .get("edge_owner_to_timeline_media") or {}).get("edges") or []
+            for edge in edges[:max_posts]:
+                node = edge.get("node") or {}
+                shortcode = node.get("shortcode") or node.get("id")
+                img = (node.get("display_url")
+                       or (node.get("thumbnail_src") or ""))
+                caption_edges = (((node.get("edge_media_to_caption") or {})
+                                  .get("edges") or []))
+                caption = ""
+                if caption_edges:
+                    caption = ((caption_edges[0].get("node") or {})
+                               .get("text") or "")
+                ts = node.get("taken_at_timestamp")
+                fecha = (datetime.utcfromtimestamp(ts).date().isoformat()
+                         if ts else None)
+                if shortcode and img:
+                    posts.append({
+                        "id": str(shortcode),
+                        "imagen_url": img,
+                        "caption": caption,
+                        "fecha": fecha,
+                        "origen": "live",
+                    })
+            if posts:
+                log.info(f"    Instagram live: {len(posts)} posts vía web_profile_info")
+                return posts
+        else:
+            log.info(f"    Instagram live web_profile_info → HTTP {r.status_code}")
+    except Exception as e:
+        log.info(f"    Instagram live web_profile_info falló: {e}")
+
+    # 2) HTML del perfil + JSON embebido
+    try:
+        r = http.get(profile, headers=headers, follow_redirects=True)
+        if r.status_code != 200:
+            log.info(f"    Instagram live perfil → HTTP {r.status_code}")
+            return []
+        html = r.text
+        if "login" in html.lower() and "edge_owner_to_timeline_media" not in html:
+            log.info("    Instagram live: login wall / sin timeline en HTML")
+            return []
+        # Buscar display_url + shortcode en blobs JSON del HTML
+        for m in re.finditer(
+            r'"shortcode"\s*:\s*"([^"]+)".{0,800}?"display_url"\s*:\s*"([^"]+)"',
+            html, re.DOTALL,
+        ):
+            sc, img = m.group(1), m.group(2).encode("utf-8").decode("unicode_escape")
+            posts.append({
+                "id": sc,
+                "imagen_url": img,
+                "caption": "",
+                "fecha": None,
+                "origen": "live",
+            })
+            if len(posts) >= max_posts:
+                break
+        if not posts:
+            for m in re.finditer(
+                r'"display_url"\s*:\s*"([^"]+)".{0,800}?"shortcode"\s*:\s*"([^"]+)"',
+                html, re.DOTALL,
+            ):
+                img = m.group(1).encode("utf-8").decode("unicode_escape")
+                sc = m.group(2)
+                posts.append({
+                    "id": sc,
+                    "imagen_url": img,
+                    "caption": "",
+                    "fecha": None,
+                    "origen": "live",
+                })
+                if len(posts) >= max_posts:
+                    break
+        if posts:
+            # dedupe por id
+            seen, uniq = set(), []
+            for p in posts:
+                if p["id"] in seen:
+                    continue
+                seen.add(p["id"])
+                uniq.append(p)
+            log.info(f"    Instagram live: {len(uniq)} posts vía HTML embebido")
+            return uniq[:max_posts]
+        log.info("    Instagram live: HTML sin posts extraíbles")
+    except Exception as e:
+        log.info(f"    Instagram live HTML falló: {e}")
+    return []
+
+
+def instagram_load_local_media(handle: str) -> list:
+    """Carteles depositados en scripts/fuentes/instagram_media/<handle>/."""
+    handle = (handle or "").strip().lstrip("@")
+    carpeta = INSTAGRAM_MEDIA_DIR / handle
+    if not carpeta.is_dir():
+        return []
+    posts = []
+    for path in sorted(carpeta.iterdir()):
+        if not path.is_file() or path.suffix.lower() not in INSTAGRAM_IMG_EXTS:
+            continue
+        if path.name.startswith("."):
+            continue
+        posts.append({
+            "id": f"local-{path.stem}",
+            "imagen_url": f"{LOCAL_IMAGE_PREFIX}{path.resolve()}",
+            "caption": "",
+            "fecha": None,
+            "origen": "local",
+            "path": str(path.resolve()),
+            "mtime_ns": path.stat().st_mtime_ns,
+            "size": path.stat().st_size,
+        })
+    if posts:
+        log.info(f"    Instagram local: {len(posts)} carteles en {carpeta}")
+    return posts
+
+
+def extract_eventos_instagram_carteles_http(oai, http, pob, posts: list) -> list:
+    """Como extract_eventos_instagram_carteles pero soporta URLs http(s) live."""
+    if not posts:
+        return []
+    import base64
+    today = date.today().isoformat()
+    system = (
+        "Eres un extractor de eventos a partir de carteles de Instagram "
+        "(asociaciones culturales / bibliotecas catalanas). "
+        f"Hoy es {today}. Lees las imágenes y devuelves JSON con TODOS los "
+        "eventos anunciados. REGLAS: (1) no inventes datos; (2) fechas en "
+        "YYYY-MM-DD — si falta el año, usa el año de hoy o el siguiente si el "
+        "mes ya pasó; (3) si un cartel lista varios días concretos "
+        "('19 i 20 d\\'agost'), usa horarios_discretos; (4) un collage con "
+        "varios carteles → un evento por cartel; (5) horas en HH:MM."
+    )
+    content = [{"type": "text", "text": (
+        "Extrae todos los eventos de estos carteles de Instagram. "
+        "Cada imagen puede contener uno o varios carteles."
+    )}]
+    for i, p in enumerate(posts):
+        try:
+            raw = _leer_bytes_imagen(http, p["imagen_url"])
+            b64 = base64.b64encode(raw).decode("ascii")
+            mime = _instagram_mime(p.get("path") or p["imagen_url"])
+            cap = (p.get("caption") or "").strip()
+            label = f"[imagen {i} id={p['id']}]"
+            if cap:
+                label += f"\nCaption: {cap[:500]}"
+            content.append({"type": "text", "text": label})
+            content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{b64}"},
+            })
+        except Exception as e:
+            log.warning(f"    Instagram: no se pudo cargar imagen {p.get('id')}: {e}")
+
+    if len(content) <= 1:
+        return []
+
+    log.info(f"    LLM [instagram-carteles] — {sum(1 for c in content if c.get('type')=='image_url')} imagen(es)...")
+    t0 = time.monotonic()
+    try:
+        resp = oai.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": INSTAGRAM_CARTELES_SCHEMA,
+            },
+            temperature=0,
+        )
+        COST.add_llm(pob, resp, op="instagram")
+        log.info(f"    LLM [instagram-carteles] OK en {time.monotonic() - t0:.1f}s")
+        data = json.loads(resp.choices[0].message.content)
+        return data.get("eventos") or []
+    except Exception as e:
+        log.warning(f"    Instagram carteles LLM falló: {e}")
+        return []
+
+
+def procesar_target_instagram(oai, http, target_row: dict, existing_events: list,
+                              umbral: float, refresh: bool, confirmaciones: list,
+                              max_nuevos=None):
+    """Procesa un perfil Instagram: live sin Apify, o carteles locales si Meta
+    bloquea. Devuelve (candidatos, noticias=[], meta, n_utiles)."""
+    pob = target_row["Poblacion"]
+    cp = target_row["CP"]
+    handle = (target_row.get("Handle")
+              or target_row["URL_Target"].rstrip("/").split("/")[-1])
+    handle = handle.lstrip("@")
+    listado_url = target_row["URL_Target"] or f"https://www.instagram.com/{handle}/"
+    log.info(f"  Instagram: @{handle} (sin Apify)")
+
+    posts = instagram_fetch_posts_public(http, handle)
+    origen = "live"
+    if not posts:
+        posts = instagram_load_local_media(handle)
+        origen = "local"
+        if not posts:
+            log.info("    Sin posts live ni carteles locales; nada que procesar")
+            return [], [], {"cambio": False}, 0
+        log.info("    Fallback a carteles locales (Meta bloqueó el scrape público)")
+
+    # Fingerprint: ids live o mtime/size de ficheros locales
+    if origen == "local":
+        basis = "|".join(
+            f"{p['id']}:{p.get('mtime_ns')}:{p.get('size')}" for p in posts)
+    else:
+        basis = "|".join(p["id"] for p in posts)
+    fingerprint = hashlib.sha256(basis.encode()).hexdigest()
+    meta = {"etag": None, "last_modified": None,
+            "fingerprint": fingerprint, "cambio": True}
+    if not refresh and fingerprint == target_row.get("Content_Fingerprint"):
+        log.info("    Sin cambios desde el último run (fingerprint IG)")
+        meta["cambio"] = False
+        return [], [], meta, 0
+
+    eventos = extract_eventos_instagram_carteles_http(oai, http, pob, posts)
+    log.info(f"    Extraídos {len(eventos)} eventos de carteles ({origen})")
+
+    # Imagen por defecto: primera del lote (collage o post)
+    img_default = posts[0]["imagen_url"] if posts else ""
+    candidatos = []
+    for idx, ev in enumerate(eventos):
+        titulo = (ev.get("titulo") or "").strip()
+        if not titulo:
+            continue
+        disc = ev.get("horarios_discretos") or []
+        fecha = (disc[0]["fecha"] if disc and disc[0].get("fecha")
+                 else ev.get("fecha_inicio"))
+        if not fecha:
+            log.info(f"    Descartado sin fecha: {titulo[:60]}")
+            continue
+        fuente_url = f"{listado_url.rstrip('/')}/#cartel-{idx}-{hashlib.sha1(titulo.encode()).hexdigest()[:8]}"
+        existente = buscar_evento_existente(
+            titulo, existing_events, umbral, ev.get("lugar") or "", fecha)
+        if existente and not refresh:
+            confirmaciones.append((existente["id"], fuente_url))
+            continue
+
+        precio = ev.get("precio_euros")
+        if precio is not None and float(precio) > 0:
+            es_gratuito, precio_f = 0, float(precio)
+        elif ev.get("es_gratuito") is False and precio is not None:
+            es_gratuito, precio_f = 0, float(precio)
+        else:
+            es_gratuito, precio_f = 1, None
+
+        cand = Candidate(
+            poblacion=pob, cp=cp, titulo=titulo,
+            lugar=(ev.get("lugar") or "").strip(),
+            fuente_url=fuente_url, fuente_listado=listado_url,
+            fecha_inicio=fecha,
+            fecha_fin=None if disc else ev.get("fecha_fin"),
+            hora_inicio=ev.get("hora_inicio") or (disc[0].get("hora_inicio") if disc else None),
+            hora_fin=ev.get("hora_fin") or (disc[0].get("hora_fin") if disc else None),
+            descripcion_larga=(ev.get("descripcion") or "").strip(),
+            organizador_nombre=(ev.get("organizador") or "").strip(),
+            es_gratuito=es_gratuito,
+            precio_euros=precio_f,
+            imagenes=[img_default] if img_default else [],
+        )
+        if disc:
+            cand.horarios_extra = [
+                Horario(
+                    fecha_inicio=h["fecha"],
+                    fecha_fin=None,
+                    hora_inicio=h.get("hora_inicio") or cand.hora_inicio,
+                    hora_fin=h.get("hora_fin") or cand.hora_fin,
+                )
+                for h in disc if h.get("fecha")
+            ]
+            if cand.horarios_extra:
+                cand.fecha_inicio = cand.horarios_extra[0].fecha_inicio
+                cand.fecha_fin = None
+        candidatos.append(cand)
+
+    if max_nuevos is not None and len(candidatos) > max_nuevos:
+        log.info(f"    Límite de prueba ({max_nuevos}): se recortan eventos IG")
+        candidatos = candidatos[:max_nuevos]
+
+    log.info(f"    Instagram: {len(candidatos)} eventos nuevos ({origen})")
+    return candidatos, [], meta, len(candidatos)
+
+
+# ============================================================================
 # LOCK (evita ejecuciones simultáneas del cron)
 # ============================================================================
 
@@ -3075,6 +3949,82 @@ def run_sync_images_only(target_name: str = "railway", api_base_url: Optional[st
         sync_remote_binarios(conn, http, ingest_target, dry_run)
     finally:
         http.close()
+        conn.close()
+
+
+def run_refresh_news_summaries(target_name: str, solo_poblacion: Optional[str],
+                               dry_run: bool = False) -> None:
+    """Reescribe Cuerpo_* y Resumen_* de noticias ya persistidas con un
+    resumen LLM (máx. 3 frases/párrafos). Usa el texto largo actual como
+    contexto y no vuelve a scrapear."""
+    if not os.getenv("OPENAI_API_KEY"):
+        sys.exit("Falta OPENAI_API_KEY en .env")
+    if target_name == "both":
+        sys.exit("--refresh-news-summaries no admite --target both; elige local o railway")
+    tgt = resolve_ingest_target(target_name)
+    oai = make_openai_client()
+    conn = get_connection(tgt)
+    log.info(f"Backfill resúmenes [{tgt.name}] -> {tgt.db_host}:{tgt.db_port}/{tgt.db_name}")
+    sql = """
+        SELECT n.ID_Unico_Noticia, c.Nombre, n.Titulo_CAT, n.Titulo_ES,
+               n.Cuerpo_CAT, n.Cuerpo_ES, n.Idioma_Origen
+        FROM NOTICIAS_MASTER n
+        JOIN CIUDADES c ON c.ID_Ciudad = n.ID_Ciudad
+        WHERE n.Estado = 'ACTIVA'
+    """
+    params = []
+    if solo_poblacion:
+        sql += " AND c.Nombre = %s"
+        params.append(solo_poblacion)
+    sql += " ORDER BY n.Fecha_Publicacion DESC"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            filas = cur.fetchall()
+        log.info(f"  {len(filas)} noticias a reescribir"
+                 + (f" ({solo_poblacion})" if solo_poblacion else ""))
+        actualizadas = 0
+        for row in filas:
+            nid = row["ID_Unico_Noticia"]
+            cuerpo_ctx = (row.get("Cuerpo_CAT") or row.get("Cuerpo_ES") or "").strip()
+            if not cuerpo_ctx:
+                log.warning(f"    Sin texto, se omite: {nid[:12]}…")
+                continue
+            noticia = Noticia(
+                poblacion=row["Nombre"],
+                titulo=row.get("Titulo_CAT") or row.get("Titulo_ES") or "",
+                fecha_publicacion="",
+                fuente_url="",
+                cuerpo=cuerpo_ctx,
+                idioma=row.get("Idioma_Origen") or "ca",
+                titulo_es=row.get("Titulo_ES") or "",
+            )
+            try:
+                enriquecer_noticia(oai, noticia)
+            except Exception as exc:
+                log.error(f"    LLM falló {nid[:12]}…: {exc}")
+                continue
+            resumen_ca = flatten_news_text(noticia.resumen)
+            resumen_es = flatten_news_text(noticia.resumen_es) or resumen_ca
+            if dry_run:
+                log.info(f"    [dry-run] {noticia.titulo[:60]} → {len(resumen_ca)} chars")
+                actualizadas += 1
+                continue
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE NOTICIAS_MASTER
+                       SET Titulo_CAT=%s, Titulo_ES=%s,
+                           Cuerpo_CAT=%s, Cuerpo_ES=%s,
+                           Resumen_CAT=%s, Resumen_ES=%s
+                     WHERE ID_Unico_Noticia=%s
+                """, (flatten_news_text(noticia.titulo)[:255],
+                      flatten_news_text(noticia.titulo_es or noticia.titulo)[:255],
+                      resumen_ca, resumen_es, resumen_ca, resumen_es, nid))
+            conn.commit()
+            actualizadas += 1
+            log.info(f"    OK {noticia.titulo[:60]} ({len(resumen_ca)} / {len(resumen_es)} chars)")
+        log.info(f"Backfill resúmenes: {actualizadas}/{len(filas)}")
+    finally:
         conn.close()
 
 
@@ -3144,8 +4094,10 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False,
 
             # Filtro temporal + enriquecimiento + persistencia
             persistidos = 0
+            descartados_pasados = 0
             for ev in merged:
                 if not filtrar_futuro(ev):
+                    descartados_pasados += 1
                     continue
                 enrich(oai, pob, ev)
                 if not dry_run:
@@ -3160,6 +4112,9 @@ def run(input_path: Path, dry_run: bool, umbral: float, refresh: bool = False,
                 else:
                     persistidos += 1
             COST.add_evento(pob, persistidos)
+            if descartados_pasados:
+                log.info(f"  Descartados por fecha pasada o sin fecha ISO: "
+                         f"{descartados_pasados} de {len(merged)}")
             log.info(f"  Eventos persistidos en {pob}: {persistidos}")
 
         sync_remote_binarios(conn, http, ingest_target, dry_run)
@@ -3179,7 +4134,7 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
     detección de cambios. Devuelve (candidatos, noticias, meta, n_utiles)."""
     pob = target_row["Poblacion"]
     cp = target_row["CP"]
-    url = target_row["URL_Target"]
+    url = normalizar_url_listado(target_row["URL_Target"])
     hint = target_row.get("Tipo_Contenido") or "MIXTO"
 
     html, meta = fetch_si_cambiado(http, target_row, refresh)
@@ -3217,47 +4172,57 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
         return cands, [], meta, len(cands) + len(confirmaciones)
 
     # --- Listado MIXTO o de NOTICIAS: clasificar cada item ---
-    html_clean = html_a_texto_enlaces(html)
-    log.info(f"    Clasificando listado {hint} ({len(html_clean):,} chars texto+enlaces)...")
-    items = clasificar_items(oai, pob, html_clean, url, hint)
-    n_ev = sum(1 for i in items if i.get("tipo") == "EVENTO")
-    n_not = sum(1 for i in items if i.get("tipo") == "NOTICIA")
-    log.info(f"    {len(items)} items: {n_ev} eventos, {n_not} noticias, "
-             f"{len(items) - n_ev - n_not} descartados")
-
+    paginas = recolectar_paginas_listado(http, url, html)
     candidatos, noticias = [], []
     detail_cache, ctx = {}, {"details_done": 0}
-    for it in items:
+    for page_url, page_html in paginas:
         if max_nuevos is not None and len(candidatos) + len(noticias) >= max_nuevos:
-            log.info(f"    Límite de prueba alcanzado ({max_nuevos} items nuevos): "
-                     f"resto del listado omitido")
             break
-        tipo = it.get("tipo")
-        titulo = (it.get("titulo") or "").strip()
-        if not titulo or tipo == "DESCARTAR":
-            continue
-        if tipo == "EVENTO":
-            existente = None if refresh else buscar_evento_existente(
-                titulo, existing_events, umbral,
-                it.get("lugar_corto") or "", it.get("fecha") or "")
-            if existente:
-                confirmaciones.append((existente["id"], it.get("url_detalle") or url))
+        html_clean = html_a_texto_enlaces(page_html)
+        log.info(f"    Clasificando listado {hint} ({len(html_clean):,} chars "
+                 f"texto+enlaces) {page_url}")
+        items = clasificar_items(oai, pob, html_clean, page_url, hint)
+        n_ev = sum(1 for i in items if i.get("tipo") == "EVENTO")
+        n_not = sum(1 for i in items if i.get("tipo") == "NOTICIA")
+        log.info(f"    {len(items)} items: {n_ev} eventos, {n_not} noticias, "
+                 f"{len(items) - n_ev - n_not} descartados")
+
+        for it in items:
+            if max_nuevos is not None and len(candidatos) + len(noticias) >= max_nuevos:
+                log.info(f"    Límite de prueba alcanzado ({max_nuevos} items nuevos): "
+                         f"resto del listado omitido")
+                break
+            tipo = it.get("tipo")
+            titulo = (it.get("titulo") or "").strip()
+            if not titulo or tipo == "DESCARTAR":
                 continue
-            item_ev = {"titulo": titulo, "fecha_inicio": it.get("fecha") or "",
-                       "hora_inicio": it.get("hora_inicio"), "hora_fin": None,
-                       "url_detalle": it.get("url_detalle"),
-                       "lugar_corto": it.get("lugar_corto"),
-                       "imagen_url": it.get("imagen_url")}
-            candidatos.append(
-                procesar_item_evento(oai, http, pob, cp, item_ev, url, detail_cache, ctx))
-        elif tipo == "NOTICIA":
-            if not refresh and buscar_noticia_existente(
-                    titulo, it.get("fecha"), existing_noticias, umbral):
-                continue
-            noticia = procesar_item_noticia(oai, http, pob, it, url)
-            if noticia:
-                noticia.id_fuente = target_row["ID_Fuente"]
-                noticias.append(noticia)
+            if tipo == "EVENTO":
+                if item_evento_ya_paso({"fecha_inicio": it.get("fecha") or "",
+                                        "fecha_fin": it.get("fecha_fin") or ""}):
+                    continue
+                existente = None if refresh else buscar_evento_existente(
+                    titulo, existing_events, umbral,
+                    it.get("lugar_corto") or "", it.get("fecha") or "")
+                if existente:
+                    confirmaciones.append(
+                        (existente["id"], it.get("url_detalle") or page_url))
+                    continue
+                item_ev = {"titulo": titulo, "fecha_inicio": it.get("fecha") or "",
+                           "hora_inicio": it.get("hora_inicio"), "hora_fin": None,
+                           "url_detalle": it.get("url_detalle"),
+                           "lugar_corto": it.get("lugar_corto"),
+                           "imagen_url": it.get("imagen_url")}
+                candidatos.append(
+                    procesar_item_evento(oai, http, pob, cp, item_ev, page_url,
+                                         detail_cache, ctx))
+            elif tipo == "NOTICIA":
+                if not refresh and buscar_noticia_existente(
+                        titulo, it.get("fecha"), existing_noticias, umbral):
+                    continue
+                noticia = procesar_item_noticia(oai, http, pob, it, page_url)
+                if noticia:
+                    noticia.id_fuente = target_row["ID_Fuente"]
+                    noticias.append(noticia)
 
     return candidatos, noticias, meta, len(candidatos) + len(noticias)
 
@@ -3265,7 +4230,8 @@ def procesar_target_web(oai, http, target_row: dict, existing_events: list,
 def run_db(dry_run: bool, umbral: float, refresh: bool = False,
            target_name: str = "local", api_base_url: Optional[str] = None,
            solo_poblacion: Optional[str] = None, hard_reset: bool = False,
-           con_dedupe: bool = True, max_items: Optional[int] = None):
+           con_dedupe: bool = True, max_items: Optional[int] = None,
+           url_contains: Optional[str] = None):
     """Pipeline dirigido por BD: las fuentes/targets salen de BIBLIOTECA_FUENTES
     + SCRAPING_TARGETS (cargadas con scripts/import_fuentes.py). Es el modo
     pensado para el cron diario: detección de cambios por URL, ingesta
@@ -3342,13 +4308,14 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                      f"(se omitirán si reaparecen)")
 
         # Targets desde la BD primaria
-        targets = load_targets_from_db(primario["conn"], solo_poblacion)
+        targets = load_targets_from_db(primario["conn"], solo_poblacion, url_contains)
         if not targets:
             sys.exit("No hay targets activos en SCRAPING_TARGETS. "
                      "Carga las semillas con: python scripts/import_fuentes.py "
                      "--input scripts/fuentes/Malgrat.json")
         log.info(f"Targets activos: {len(targets)}"
-                 + (f" (solo {solo_poblacion})" if solo_poblacion else ""))
+                 + (f" (solo {solo_poblacion})" if solo_poblacion else "")
+                 + (f" (url~{url_contains})" if url_contains else ""))
 
         # Agrupar por población conservando el orden por prioridad
         por_poblacion = {}
@@ -3383,9 +4350,12 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                             cands, nots, meta, utiles = procesar_target_telegram(
                                 oai, http, t, existing_events, existing_noticias,
                                 umbral, refresh, confirmaciones, presupuesto)
+                        elif t.get("Plataforma") == "INSTAGRAM":
+                            cands, nots, meta, utiles = procesar_target_instagram(
+                                oai, http, t, existing_events,
+                                umbral, refresh, confirmaciones, presupuesto)
                         else:
-                            # IG/FB/X/YouTube: conector Apify pendiente (fase 2).
-                            # No deberían tener target activo; defensa por si acaso.
+                            # FB/X/YouTube: conector Apify pendiente (fase 2).
                             log.info(f"  Plataforma {t.get('Plataforma')} sin conector "
                                      f"(fase 2), target ignorado: {t['URL_Target']}")
                             continue
@@ -3420,8 +4390,10 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
             if candidates:
                 log.info(f"  Tras fusión (umbral {umbral}): {len(merged)} eventos únicos")
             persistidos = 0
+            descartados_pasados = 0
             for ev in merged:
                 if not filtrar_futuro(ev):
+                    descartados_pasados += 1
                     continue
                 enrich(oai, pob, ev)
                 if dry_run:
@@ -3442,6 +4414,9 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                 if ok_alguno:
                     persistidos += 1
             COST.add_evento(pob, persistidos)
+            if descartados_pasados:
+                log.info(f"  Descartados por fecha pasada o sin fecha ISO: "
+                         f"{descartados_pasados} de {len(merged)}")
 
             # --- Noticias: dedupe intra-run + enriquecimiento + persistencia ---
             noticias_persistidas = 0
@@ -3546,6 +4521,11 @@ def main():
                                      "cargar antes con scripts/import_fuentes.py)"))
     ap.add_argument("--sync-images-only", action="store_true",
                     help="Solo re-descarga y sube a Railway las imágenes que falten en el servidor")
+    ap.add_argument("--backfill-images", action="store_true",
+                    help=("Rellena imágenes de eventos ya en BD sin binario: "
+                          "relee Fuente_URL_Original, captura og:image/img CMS "
+                          "y descarga/sube. Combinable con --url-contains / "
+                          "--poblacion / --target."))
     ap.add_argument("--dry-run", action="store_true", help="No toca BD ni descarga imágenes")
     ap.add_argument("--umbral", type=float, default=SIMILARITY_THRESHOLD,
                     help=(f"Umbral de similitud (0..1) para fusionar eventos de la misma "
@@ -3582,6 +4562,15 @@ def main():
     ap.add_argument("--api-base-url", default=None,
                     help=("URL base de la API en producción (solo con --target railway). "
                           "Por defecto EVENTS_API_BASE_URL o https://eventquery.uat.km0lab.com"))
+    ap.add_argument("--url-contains", dest="url_contains", default=None,
+                    metavar="TEXTO",
+                    help=("Procesa solo targets cuya URL_Target contenga este "
+                          "texto (solo modo BD). Útil para probar una fuente."))
+    ap.add_argument("--refresh-news-summaries", action="store_true",
+                    help=("Reescribe Cuerpo_* y Resumen_* de noticias ya en BD "
+                          "con un resumen LLM (máx. 3 frases/párrafos). No "
+                          "scrapea; usa el texto persistido como contexto. "
+                          "Combinable con --poblacion / --target / --dry-run."))
     args = ap.parse_args()
     if args.modelo:
         set_llm_model(args.modelo)
@@ -3590,12 +4579,21 @@ def main():
             ap.error("--sync-images-only requiere --target railway")
         run_sync_images_only(args.target, args.api_base_url, args.dry_run)
         return
+    if args.backfill_images:
+        run_backfill_images(args.target, args.api_base_url, args.dry_run,
+                            args.url_contains, args.solo_poblacion)
+        return
+    if args.refresh_news_summaries:
+        run_refresh_news_summaries(args.target, args.solo_poblacion, args.dry_run)
+        return
     if args.input and args.target == "both":
         ap.error("--target both solo está soportado en modo BD (sin --input)")
     if args.input and args.hard_reset:
         ap.error("--hard-reset solo está soportado en modo BD (sin --input)")
     if args.input and args.max_items is not None:
         ap.error("--max-items solo está soportado en modo BD (sin --input)")
+    if args.input and args.url_contains:
+        ap.error("--url-contains solo está soportado en modo BD (sin --input)")
 
     if not adquirir_lock():
         sys.exit(1)
@@ -3607,7 +4605,7 @@ def main():
             run_db(args.dry_run, args.umbral, args.refresh,
                    args.target, args.api_base_url, args.solo_poblacion,
                    args.hard_reset, con_dedupe=not args.sin_dedupe,
-                   max_items=args.max_items)
+                   max_items=args.max_items, url_contains=args.url_contains)
     finally:
         liberar_lock()
 

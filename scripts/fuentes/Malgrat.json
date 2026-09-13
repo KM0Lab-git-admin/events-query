@@ -11,6 +11,14 @@
     },
     {
       "tipo": "FUENTE_OFICIAL",
+      "nombre": "Històric agenda Ajuntament de Malgrat",
+      "url": "https://www.ajmalgrat.cat/comunicacio/historic-agenda",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Listado paginado (?pag=). El pipeline fuerza archive_order=DESC y el año corriente."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
       "nombre": "Notícies Ajuntament de Malgrat",
       "url": "https://www.ajmalgrat.cat/comunicacio/noticies",
       "prioridad": 1,
@@ -24,11 +32,44 @@
       "tipo_contenido": "MIXTO"
     },
     {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Biblioteca La Cooperativa (calendari Diba)",
+      "url": "https://bibliotecavirtual.diba.cat/ca/malgrat-de-mar-biblioteca-la-cooperativa/-/cercador/cercaCalendari",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "El pipeline añade /mes/año y recorre meses siguientes."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Centre Cívic 2026 (PDF)",
+      "url": "https://www.ajmalgrat.cat/media/repository/noticies/2026/Documents/AgendaCentreCivic2026.pdf",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "PDF de talleres y actividades recurrentes sep–dic (pypdf → texto → LLM)."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — agenda",
+      "url": "https://www.turismemaresme.cat/ca/descobreix/agenda/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Listado comarcal paginado; el pipeline filtra ítems que mencionan Malgrat."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Malgrat Turisme — agenda d'activitats",
+      "url": "https://turismemalgrat.com/categoria-gaudeix/agenda-activitats/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
       "tipo": "AGREGADOR",
       "nombre": "esdeveniments.cat — Malgrat de Mar",
       "url": "https://www.esdeveniments.cat/malgrat-de-mar",
       "prioridad": 1,
-      "tipo_contenido": "EVENTOS"
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Listado vacío en 2026-08; reactivar cuando vuelva a publicar actos."
     },
     {
       "tipo": "AGREGADOR",
@@ -36,7 +77,9 @@
       "url": "https://www.esdeveniments.cat/e/festival-libellula-tallers-circ-12-de-juny-del-2026-fcfafc8a-2a57-4097-bc10-42de90213e10",
       "prioridad": 1,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
     },
     {
       "tipo": "AGREGADOR",
@@ -44,7 +87,9 @@
       "url": "https://www.esdeveniments.cat/e/firavi-12-de-juny-del-2026-2f0e757f-77b3-4003-91f6-284ebe4efe73",
       "prioridad": 1,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
     },
     {
       "tipo": "AGREGADOR",
@@ -52,7 +97,9 @@
       "url": "https://www.esdeveniments.cat/e/fira-animalista-13-de-juny-del-2026-d28dc6c5-40b0-44bf-bb85-1eacd33f6f0e",
       "prioridad": 1,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
     },
     {
       "tipo": "AGREGADOR",
@@ -60,7 +107,9 @@
       "url": "https://www.turismemaresme.cat/es/descubre/agenda/2204/festival-libel-lula",
       "prioridad": 2,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Ficha suelta caducada; sustituida por el listado de agenda."
     },
     {
       "tipo": "AGREGADOR",
@@ -68,7 +117,9 @@
       "url": "https://www.turismemaresme.cat/ca/descobreix/agenda/1679/firavi-a-malgrat-de-mar",
       "prioridad": 2,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Ficha suelta caducada; sustituida por el listado de agenda."
     },
     {
       "tipo": "AGREGADOR",
@@ -76,14 +127,18 @@
       "url": "https://firescatalanes.cat/fires/fira-animalista-malgrat-de-mar/",
       "prioridad": 2,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
     },
     {
       "tipo": "AGREGADOR",
       "nombre": "Fires Catalanes — Malgrat de Mar",
       "url": "https://firescatalanes.cat/ubicacio/malgrat-de-mar/",
       "prioridad": 2,
-      "tipo_contenido": "EVENTOS"
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Listado vacío en 2026-08."
     },
     {
       "tipo": "AGREGADOR",
@@ -91,7 +146,9 @@
       "url": "https://www.avui.info/eventos/libel-lula",
       "prioridad": 3,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
     },
     {
       "tipo": "AGREGADOR",
@@ -99,7 +156,9 @@
       "url": "https://www.avui.info/eventos/fira-animalista-malgrat",
       "prioridad": 3,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
     },
     {
       "tipo": "AGREGADOR",
@@ -107,21 +166,27 @@
       "url": "https://www.avui.info/eventos/vespres-can-pins",
       "prioridad": 3,
       "tipo_contenido": "EVENTOS",
-      "tipo_target": "WEB_DETALLE"
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
     },
     {
       "tipo": "AGREGADOR",
       "nombre": "Entrapolis — Associació Aixafaroques (CA)",
       "url": "https://www.entrapolis.com/entrades/associacio-aixafaroques",
       "prioridad": 3,
-      "tipo_contenido": "EVENTOS"
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Listado vacío en 2026-08."
     },
     {
       "tipo": "AGREGADOR",
       "nombre": "Entrapolis — Associació Aixafaroques (ES)",
       "url": "https://www.entrapolis.com/entradas/associacio-aixafaroques",
       "prioridad": 3,
-      "tipo_contenido": "EVENTOS"
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Listado vacío en 2026-08."
     },
     {
       "tipo": "RED_SOCIAL_PERFIL",
@@ -136,13 +201,24 @@
     {
       "tipo": "RED_SOCIAL_PERFIL",
       "plataforma": "INSTAGRAM",
+      "handle": "laguardadelllibre",
+      "nombre": "Instagram La Guarda del Llibre",
+      "url": "https://www.instagram.com/laguardadelllibre/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": true,
+      "notas": "Sin Apify: intenta perfil público; si Meta bloquea (429), usa scripts/fuentes/instagram_media/laguardadelllibre/ + cartel-OCR"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
       "handle": "ajmalgrat",
       "nombre": "Instagram Ajuntament de Malgrat",
       "url": "https://www.instagram.com/ajmalgrat/",
       "prioridad": 1,
       "tipo_contenido": "MIXTO",
-      "activa": false,
-      "notas": "Fase 2: conector Apify"
+      "activa": true,
+      "notas": "Sin Apify: live best-effort + scripts/fuentes/instagram_media/ajmalgrat/"
     },
     {
       "tipo": "RED_SOCIAL_PERFIL",
@@ -185,8 +261,19 @@
       "url": "https://www.instagram.com/visitmalgratdemar/",
       "prioridad": 2,
       "tipo_contenido": "EVENTOS",
-      "activa": false,
-      "notas": "Fase 2: conector Apify"
+      "activa": true,
+      "notas": "Sin Apify: live best-effort + scripts/fuentes/instagram_media/visitmalgratdemar/"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
+      "handle": "bibliomalgrat",
+      "nombre": "Instagram Biblioteca La Cooperativa",
+      "url": "https://www.instagram.com/bibliomalgrat/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": true,
+      "notas": "Sin Apify: live best-effort + scripts/fuentes/instagram_media/bibliomalgrat/"
     },
     {
       "tipo": "RED_SOCIAL_PERFIL",

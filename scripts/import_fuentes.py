@@ -42,8 +42,8 @@ REGLAS
   - Tipo_Target deducido: SOCIAL_PERFIL para redes; WEB_DETALLE si la URL casa
     con patrones de página de detalle o se fuerza con "tipo_target";
     WEB_LISTADO en el resto.
-  - Fuentes con "activa": false -> fila en BIBLIOTECA_FUENTES con Activa=0 y
-    SIN target (quedan preparadas para la fase 2 sin gastar scraping).
+  - Fuentes con "activa": false -> fila en BIBLIOTECA_FUENTES con Activa=0,
+    sin target nuevo, y target existente (si lo hay) en Estado=PAUSADO.
   - La ciudad debe existir o se crea sin coordenadas (el pipeline la geocodifica
     en su primera ejecución si le faltan).
 """
@@ -176,6 +176,15 @@ def upsert_fuente(conn, id_ciudad: int, f: dict) -> tuple:
         return cur.lastrowid, True
 
 
+def pausar_target_si_existe(conn, id_fuente: int, url: str):
+    """Si la fuente pasa a inactiva, pausa el target para no seguir scrapeando."""
+    origen_id = f"{id_fuente}:{url}"
+    with conn.cursor() as cur:
+        cur.execute("""UPDATE SCRAPING_TARGETS SET Estado='PAUSADO'
+            WHERE Origen_Tabla=%s AND Origen_ID=%s AND Estado != 'PAUSADO'""",
+                    ("BIBLIOTECA_FUENTES", origen_id))
+
+
 def upsert_target(conn, id_fuente: int, id_ciudad: int, f: dict) -> bool:
     """Upsert en SCRAPING_TARGETS por UQ_TARGET_ORIGEN. Devuelve True si creado."""
     url = f["url"].strip()
@@ -188,7 +197,8 @@ def upsert_target(conn, id_fuente: int, id_ciudad: int, f: dict) -> bool:
         r = cur.fetchone()
         if r:
             cur.execute("""UPDATE SCRAPING_TARGETS
-                SET Tipo_Target=%s, Plataforma=%s, URL_Target=%s
+                SET Tipo_Target=%s, Plataforma=%s, URL_Target=%s,
+                    Estado=IF(Estado='PAUSADO','PENDIENTE',Estado)
                 WHERE ID_Target=%s""",
                 (tipo_target, f.get("plataforma"), url, r["ID_Target"]))
             return False
@@ -235,6 +245,7 @@ def importar(input_path: Path, target_name: str, dry_run: bool):
                     targets_nuevos += 1
             else:
                 sin_target += 1
+                pausar_target_si_existe(conn, id_fuente, f["url"].strip())
             log.info(f"{'NUEVA' if creada else 'upd  '} fuente #{id_fuente} "
                      f"{f['tipo']:<18} {estado:<16} {f['url']}")
 

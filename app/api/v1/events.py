@@ -120,7 +120,7 @@ async def list_events(
         None, description="Start date filter (YYYY-MM-DD), defaults to today"
     ),
     fecha_hasta: Optional[date] = Query(
-        None, description="End date filter (YYYY-MM-DD), defaults to +30 days"
+        None, description="End date filter (YYYY-MM-DD), defaults to +90 days"
     ),
     es_gratuito: Optional[bool] = Query(None, description="Filter free events only"),
     search: Optional[str] = Query(None, description="Search in title and tags"),
@@ -132,7 +132,7 @@ async def list_events(
         if fecha_desde is None:
             fecha_desde = date.today()
         if fecha_hasta is None:
-            fecha_hasta = date.today() + timedelta(days=30)
+            fecha_hasta = date.today() + timedelta(days=90)
 
         offset = (page - 1) * page_size
 

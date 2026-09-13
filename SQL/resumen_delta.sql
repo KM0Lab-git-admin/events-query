@@ -44,11 +44,11 @@ SET @existe := (
 );
 SET @sql := IF(@existe = 0,
   'ALTER TABLE `NOTICIAS_MASTER`
-     ADD COLUMN `Resumen_CAT` VARCHAR(500) NULL
-       COMMENT ''Resumen 2-3 frases para tarjetas (generado por LLM)''
+     ADD COLUMN `Resumen_CAT` VARCHAR(1200) NULL
+       COMMENT ''Resumen max 3 frases/parrafos cortos (LLM); es lo persistido''
        AFTER `Cuerpo_ES`,
-     ADD COLUMN `Resumen_ES` VARCHAR(500) NULL
-       COMMENT ''Resumen 2-3 frases para tarjetas (generado por LLM)''
+     ADD COLUMN `Resumen_ES` VARCHAR(1200) NULL
+       COMMENT ''Resumen max 3 frases/parrafos cortos (LLM); es lo persistido''
        AFTER `Resumen_CAT`',
   'SELECT ''Resumen ya existe, sin cambios'' AS Resultado');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

@@ -11,7 +11,7 @@ const TEXTOS_UI = {
     mostrando: 'Mostrando',
     cargando: 'Cargando noticias...',
     noResultados: 'No se encontraron noticias con los filtros seleccionados',
-    cuerpo: 'Contenido',
+    cuerpo: 'Resumen',
     ciudadLabel: 'Ciudad',
     publicacion: 'Publicación',
     etiquetas: 'Tags',
@@ -25,7 +25,7 @@ const TEXTOS_UI = {
     ocultarFiltros: 'Ocultar filtros',
     error: 'Error',
     apiNoResponde:
-      'No hay respuesta de la API (¿arrancada en http://localhost:8000?). Revisa uvicorn y MySQL.'
+      'No hay respuesta de la API de noticias. Revisa que events-query esté en marcha y MySQL local.'
   },
   ca: {
     tituloSeccion: 'Explorar Notícies',
@@ -37,7 +37,7 @@ const TEXTOS_UI = {
     mostrando: 'Mostrant',
     cargando: 'Carregant notícies...',
     noResultados: 'No s\'han trobat notícies amb els filtres seleccionats',
-    cuerpo: 'Contingut',
+    cuerpo: 'Resum',
     ciudadLabel: 'Ciutat',
     publicacion: 'Publicació',
     etiquetas: 'Etiquetes',
@@ -51,7 +51,7 @@ const TEXTOS_UI = {
     ocultarFiltros: 'Amagar filtres',
     error: 'Error',
     apiNoResponde:
-      'Sense resposta de l\'API (¿arrancada a http://localhost:8000?). Revisa uvicorn i MySQL.'
+      'Sense resposta de l\'API de notícies. Revisa que events-query estigui en marxa i MySQL local.'
   }
 }
 
@@ -160,7 +160,8 @@ function NewsList() {
     let score = 0
     if (normalizar(noticia.titulo_es).includes(term) || normalizar(noticia.titulo_cat).includes(term)) score += 3
     if (normalizar(noticia.ciudad).includes(term)) score += 2
-    if (normalizar(noticia.cuerpo_es).includes(term) || normalizar(noticia.cuerpo_cat).includes(term)) score += 1
+    if (normalizar(noticia.resumen_es).includes(term) || normalizar(noticia.resumen_cat).includes(term)
+        || normalizar(noticia.cuerpo_es).includes(term) || normalizar(noticia.cuerpo_cat).includes(term)) score += 1
     const tagsStr = [...(noticia.tags_es || []), ...(noticia.tags_cat || [])].join(' ')
     if (normalizar(tagsStr).includes(term)) score += 1
     return score
@@ -192,8 +193,9 @@ function NewsList() {
       return idioma === 'ca' ? (noticia.titulo_cat || noticia.titulo_es) : (noticia.titulo_es || noticia.titulo_cat)
     }
     if (campo === 'cuerpo') {
-      const raw =
-        idioma === 'ca' ? (noticia.cuerpo_cat || noticia.cuerpo_es) : (noticia.cuerpo_es || noticia.cuerpo_cat)
+      const raw = idioma === 'ca'
+        ? (noticia.resumen_cat || noticia.cuerpo_cat || noticia.resumen_es || noticia.cuerpo_es)
+        : (noticia.resumen_es || noticia.cuerpo_es || noticia.resumen_cat || noticia.cuerpo_cat)
       return normalizarCuerpo(raw)
     }
     if (campo === 'tags') {
