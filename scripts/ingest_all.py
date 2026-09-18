@@ -1887,6 +1887,107 @@ def llm_json(oai, pob, system, user, schema, op="otros", context: str = ""):
     return json.loads(resp.choices[0].message.content)
 
 
+# ============================================================================
+# JSON-LD: extracción estructurada de listados (schema.org/Event) sin LLM
+# ============================================================================
+
+def _jsonld_iter_objects(raw: str):
+    raw = (raw or "").strip()
+    if not raw:
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if isinstance(data, list):
+        yield from data
+    else:
+        yield data
+
+
+def _jsonld_is_event(node: dict) -> bool:
+    t = node.get("@type")
+    if isinstance(t, list):
+        return any("Event" in str(x) for x in t)
+    return bool(t and "Event" in str(t))
+
+
+def _jsonld_walk(obj):
+    """Yield de todos los nodos Event, incluidos los envueltos en
+    ItemList/itemListElement/ListItem o @graph."""
+    if isinstance(obj, dict):
+        if _jsonld_is_event(obj):
+            yield obj
+        for v in obj.values():
+            yield from _jsonld_walk(v)
+    elif isinstance(obj, list):
+        for x in obj:
+            yield from _jsonld_walk(x)
+
+
+def _jsonld_fecha_hora(value):
+    """(fecha_iso, hora_hhmm|None) desde un startDate/endDate schema.org."""
+    if not value:
+        return None, None
+    s = str(value).strip().replace("Z", "+00:00")
+    try:
+        if "T" in s:
+            dt = datetime.fromisoformat(s)
+            return dt.date().isoformat(), dt.strftime("%H:%M")
+        return datetime.strptime(s[:10], "%Y-%m-%d").date().isoformat(), None
+    except (ValueError, TypeError):
+        return None, None
+
+
+def extract_listing_jsonld(html: str, listado_url: str):
+    """Extrae eventos de los bloques application/ld+json (schema.org/Event).
+
+    Devuelve None si la página no tiene JSON-LD de eventos (el llamante cae
+    al extractor LLM). Si devuelve lista, es la fuente de verdad del listado:
+    gratis, determinista, y cubre webs JS-heavy cuyo texto visible queda
+    vacío (caso real: esdeveniments.cat, 472 KB de HTML y 0 chars de texto)."""
+    soup = BeautifulSoup(html, "lxml")
+    items, seen = [], set()
+    for tag in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = tag.string or tag.get_text() or ""
+        for obj in _jsonld_iter_objects(raw):
+            for ev in _jsonld_walk(obj):
+                titulo = str(ev.get("name") or "").strip()
+                fecha, hora = _jsonld_fecha_hora(ev.get("startDate"))
+                if not titulo or not fecha:
+                    continue
+                url_ev = ev.get("url") or ev.get("@id")
+                url_ev = urljoin(listado_url, str(url_ev)) if url_ev else None
+                key = url_ev or f"{titulo}|{fecha}"
+                if key in seen:
+                    continue
+                seen.add(key)
+                loc = ev.get("location")
+                if isinstance(loc, dict):
+                    lugar = loc.get("name")
+                elif isinstance(loc, str):
+                    lugar = loc
+                else:
+                    lugar = None
+                img = ev.get("image")
+                if isinstance(img, list):
+                    img = img[0] if img else None
+                if isinstance(img, dict):
+                    img = img.get("url")
+                fecha_fin, hora_fin = _jsonld_fecha_hora(ev.get("endDate"))
+                items.append({
+                    "titulo": titulo,
+                    "fecha_inicio": fecha,
+                    "hora_inicio": hora,
+                    # hora_fin solo si el evento empieza y acaba el mismo día
+                    "hora_fin": hora_fin if fecha_fin == fecha else None,
+                    "url_detalle": url_ev,
+                    "lugar_corto": str(lugar).strip() if lugar else None,
+                    "imagen_url": urljoin(listado_url, str(img)) if img else None,
+                })
+    return items or None
+
+
 def extract_listing(oai, pob, html_clean, listado_url):
     today = date.today().isoformat()
     system = (
@@ -2252,11 +2353,15 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
     for page_url, page_html in paginas:
         if max_nuevos is not None and len(candidates) >= max_nuevos:
             break
-        html_clean = html_a_texto_enlaces(page_html)
-        log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars "
-                 f"texto+enlaces) {page_url}")
-        items = extract_listing(oai, pob, html_clean, page_url)
-        log.info(f"    {len(items)} eventos en el listado")
+        items = extract_listing_jsonld(page_html, page_url)
+        if items is not None:
+            log.info(f"    {len(items)} eventos vía JSON-LD (sin LLM) {page_url}")
+        else:
+            html_clean = html_a_texto_enlaces(page_html)
+            log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars "
+                     f"texto+enlaces) {page_url}")
+            items = extract_listing(oai, pob, html_clean, page_url)
+            log.info(f"    {len(items)} eventos en el listado")
 
         for it in items:
             if max_nuevos is not None and len(candidates) >= max_nuevos:
