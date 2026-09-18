@@ -34,6 +34,9 @@ Pillow>=10.4.0
 
 # Extracción de texto de PDFs (agenda Centre Cívic y similares)
 pypdf>=5.0.0
+# Renderizado de páginas PDF a imagen (extracción visual con LLM) y
+# texto con orden de columnas correcto (sort=True)
+PyMuPDF>=1.24.0
 
 # Development
 black==24.3.0

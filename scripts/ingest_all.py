@@ -77,7 +77,7 @@ FORMATO DEL JSON DE ENTRADA (legacy)
 
 DEPENDENCIAS
 ------------
-    pip install httpx beautifulsoup4 lxml openai pymysql Pillow python-dotenv pypdf
+    pip install httpx beautifulsoup4 lxml openai pymysql Pillow python-dotenv pypdf PyMuPDF
 
 VARIABLES DE ENTORNO (.env)
 ---------------------------
@@ -86,9 +86,16 @@ VARIABLES DE ENTORNO (.env)
     --target railway -> RAILWAY_DB_HOST, RAILWAY_DB_PORT, RAILWAY_DB_USER,
                         RAILWAY_DB_PASSWORD, RAILWAY_DB_NAME
                         (+ EVENTS_API_BASE_URL, INGEST_UPLOAD_SECRET o RAILWAY_DB_PASSWORD)
+    PDF_VISION=1|0          Extracción visual de PDFs (páginas renderizadas al
+                            LLM con visión). Cubre carteles y texto convertido
+                            a curvas. Por defecto activada.
+    PDF_VISION_DPI=150      Resolución de renderizado de páginas PDF.
+    PDF_VISION_MAX_PAGINAS=30   Tope de páginas renderizadas por PDF.
+    PDF_VISION_PAGINAS_POR_LLAMADA=4   Páginas por llamada LLM de visión.
 """
 
 import argparse
+import base64
 import csv
 import difflib
 import hashlib
@@ -192,6 +199,15 @@ OPENAI_MAX_RETRIES = int(os.getenv("OPENAI_MAX_RETRIES", "3"))
 # que vienen de webs distintas (p.ej. el mismo evento en catalán y castellano).
 # Configurable por env var o por el flag CLI --umbral. 0.75 = bastante tolerante.
 SIMILARITY_THRESHOLD = float(os.getenv("FUSION_SIMILARITY_THRESHOLD", "0.75"))
+
+# Extracción VISUAL de PDFs: renderiza cada página a imagen y la pasa al LLM
+# con visión. Cubre el contenido no extraíble como texto (carteles, texto
+# convertido a curvas/outlines, imágenes con texto). Los duplicados con la
+# capa de texto se resuelven en la fusión por título+fecha.
+PDF_VISION = os.getenv("PDF_VISION", "1") not in ("0", "false", "off")
+PDF_VISION_DPI = int(os.getenv("PDF_VISION_DPI", "150"))
+PDF_VISION_MAX_PAGINAS = int(os.getenv("PDF_VISION_MAX_PAGINAS", "30"))
+PDF_VISION_PAGINAS_POR_LLAMADA = int(os.getenv("PDF_VISION_PAGINAS_POR_LLAMADA", "4"))
 
 # Catálogo cerrado de categorías (debe coincidir con la tabla CATEGORIAS).
 # (slug, nombre_es, nombre_ca, padre_slug|None)
@@ -1302,12 +1318,42 @@ def es_url_pdf(url: str) -> bool:
     return urlparse(url).path.lower().endswith(".pdf")
 
 
+def _import_pymupdf():
+    """PyMuPDF se importa como 'pymupdf' (>=1.24) o 'fitz' (alias clásico)."""
+    try:
+        import pymupdf
+        return pymupdf
+    except ImportError:
+        try:
+            import fitz
+            return fitz
+        except ImportError:
+            return None
+
+
 def pdf_bytes_a_texto(data: bytes) -> str:
-    """Texto extraíble de un PDF (Centre Cívic y similares)."""
+    """Texto extraíble de un PDF (Centre Cívic y similares).
+
+    Extractor principal: PyMuPDF con sort=True (respeta el orden de lectura
+    en maquetas a dos columnas y extrae texto dentro de Form XObjects, cosas
+    que pypdf no hace). Fallback: pypdf."""
+    pm = _import_pymupdf()
+    if pm is not None:
+        try:
+            doc = pm.open(stream=data, filetype="pdf")
+            partes = []
+            for page in doc:
+                t = (page.get_text("text", sort=True) or "").strip()
+                if t:
+                    partes.append(t)
+            if partes:
+                return "\n\n".join(partes)
+        except Exception as e:
+            log.warning(f"    PDF: fallo PyMuPDF, probando pypdf: {e}")
     try:
         from pypdf import PdfReader
     except ImportError:
-        log.warning("    PDF ignorado: falta el paquete pypdf")
+        log.warning("    PDF ignorado: faltan los paquetes pymupdf/pypdf")
         return ""
     try:
         reader = PdfReader(io.BytesIO(data))
@@ -1320,6 +1366,32 @@ def pdf_bytes_a_texto(data: bytes) -> str:
     except Exception as e:
         log.warning(f"    No se pudo leer el PDF: {e}")
         return ""
+
+
+def pdf_bytes_a_imagenes(data: bytes, max_paginas: int = 0) -> list:
+    """Renderiza las páginas del PDF a PNG (lista de bytes) con PyMuPDF.
+
+    Necesario para el contenido NO extraíble como texto: carteles, texto
+    convertido a curvas vectoriales (outlines) o imágenes con texto, que
+    ningún extractor de capa de texto (pypdf/PyMuPDF) puede leer."""
+    pm = _import_pymupdf()
+    if pm is None:
+        log.warning("    PDF visión: falta PyMuPDF (pip install PyMuPDF)")
+        return []
+    try:
+        doc = pm.open(stream=data, filetype="pdf")
+        zoom = PDF_VISION_DPI / 72.0
+        mat = pm.Matrix(zoom, zoom)
+        pngs = []
+        for page in doc:
+            if max_paginas and len(pngs) >= max_paginas:
+                break
+            pix = page.get_pixmap(matrix=mat)
+            pngs.append(pix.tobytes("png"))
+        return pngs
+    except Exception as e:
+        log.warning(f"    PDF: no se pudieron renderizar páginas: {e}")
+        return []
 
 
 def respuesta_a_html_listado(url: str, response: httpx.Response) -> str:
@@ -1509,13 +1581,15 @@ LISTING_SCHEMA = {
                     "properties": {
                         "titulo": {"type": "string", "description": "Título limpio, sin fechas ni horas mezcladas."},
                         "fecha_inicio": {"type": "string", "description": "YYYY-MM-DD. Convierte fechas relativas ('avui','demà') y catalanas ('5 maig') usando la fecha de hoy dada."},
+                        "fecha_fin": {"type": ["string", "null"], "description": "YYYY-MM-DD de fin SOLO para rangos continuos ('Del 13 d'agost al 20 de setembre', 'fins al...'). null si es un solo día, fechas discretas o actividad semanal recurrente."},
+                        "dias_semana": {"type": ["array", "null"], "items": {"type": "string"}, "description": "SOLO para actividades semanales recurrentes ('dilluns i dimecres de 16 a 19 h'): lista de días en castellano ['lunes','miércoles']. null si es fecha única o rango continuo."},
                         "hora_inicio": {"type": ["string", "null"], "description": "HH:MM 24h o null."},
                         "hora_fin": {"type": ["string", "null"], "description": "HH:MM o null. SOLO si aparece explícitamente un rango/hora fin. NO la inventes."},
                         "url_detalle": {"type": ["string", "null"], "description": "URL ABSOLUTA y REAL a la página de detalle. Si no encuentras una URL clara y completa, devuelve null. NUNCA inventes ni completes URLs parciales."},
                         "lugar_corto": {"type": ["string", "null"], "description": "Lugar tal como aparece en el listado."},
                         "imagen_url": {"type": ["string", "null"], "description": "URL absoluta de imagen si aparece."},
                     },
-                    "required": ["titulo", "fecha_inicio", "hora_inicio", "hora_fin", "url_detalle", "lugar_corto", "imagen_url"],
+                    "required": ["titulo", "fecha_inicio", "fecha_fin", "dias_semana", "hora_inicio", "hora_fin", "url_detalle", "lugar_corto", "imagen_url"],
                     "additionalProperties": False,
                 },
             }
@@ -1887,6 +1961,35 @@ def llm_json(oai, pob, system, user, schema, op="otros", context: str = ""):
     return json.loads(resp.choices[0].message.content)
 
 
+def llm_json_vision(oai, pob, system, user_text, pngs: list, schema,
+                    op="vision", context: str = ""):
+    """llm_json con imágenes adjuntas (páginas de PDF renderizadas a PNG).
+    Mismo contrato JSON que llm_json; las imágenes van como data URLs."""
+    ctx = f" — {context}" if context else ""
+    log.info(f"    LLM [{op}]{ctx}: enviando {len(pngs)} página(s) renderizada(s)...")
+    content = [{"type": "text", "text": user_text}]
+    for png in pngs:
+        b64 = base64.b64encode(png).decode("ascii")
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{b64}"}})
+    t0 = time.monotonic()
+    try:
+        resp = oai.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": content}],
+            response_format={"type": "json_schema", "json_schema": schema},
+            temperature=0,
+        )
+    except Exception as exc:
+        log.error(f"    LLM [{op}] falló tras {time.monotonic() - t0:.1f}s: {exc}")
+        raise
+    elapsed = time.monotonic() - t0
+    COST.add_llm(pob, resp, op)
+    log.info(f"    LLM [{op}] OK en {elapsed:.1f}s")
+    return json.loads(resp.choices[0].message.content)
+
+
 # ============================================================================
 # JSON-LD: extracción estructurada de listados (schema.org/Event) sin LLM
 # ============================================================================
@@ -2002,10 +2105,26 @@ def extract_listing(oai, pob, html_clean, listado_url):
         "devuélvelos TODOS como entradas separadas: son sesiones o funciones distintas "
         "del mismo evento (p.ej. tres funciones de teatro, un ciclo de conciertos).\n"
         "(4) URLs absolutas y reales. Si no encuentras URL clara, null. NUNCA inventes.\n"
-        "(5) Solo eventos futuros o en curso.\n"
+        "(5) Solo eventos futuros o en curso. OJO: una exposición o evento "
+        "'Del X al Y de mes' sigue EN CURSO aunque X ya haya pasado; en ese "
+        "caso fecha_inicio=X y fecha_fin=Y (rango continuo), NUNCA lo descartes "
+        "por haber empezado.\n"
         "(6) EXHAUSTIVIDAD: devuelve TODOS los eventos del listado, no solo los "
         "destacados. Incluye talleres, actividades recurrentes, sesiones de "
-        "entidades locales, cursos y actividades deportivas o infantiles."
+        "entidades locales, cursos y actividades deportivas o infantiles.\n"
+        "(7) ACTOS DENTRO DE RANGOS: si un evento de rango (exposición, feria) "
+        "menciona un acto puntual con fecha propia (p.ej. 'visita guiada el "
+        "20 de setembre a les 12 h'), extráelo TAMBIÉN como evento separado "
+        "con su fecha y hora.\n"
+        "(8) ACTIVIDADES SEMANALES RECURRENTES ('dilluns i dimecres de 16 a "
+        "19 h', típico en agendas anuales de equipamientos): fecha_inicio = "
+        "próxima ocurrencia futura de ese día de la semana, dias_semana = "
+        "todos los días indicados (['lunes','miércoles']), fecha_fin = null.\n"
+        "(9) Los PERÍODOS DE PRECIO o del documento ('54€ gener - juny', "
+        "'GENER - DESEMBRE 2026') NO son fechas del evento: NUNCA los uses "
+        "como fecha_inicio ni fecha_fin.\n"
+        "(10) Cada fecha debe estar asociada explícitamente a ESE evento en "
+        "el texto; nunca asignes la fecha de un evento a otro."
     )
     user = f"URL listado: {listado_url}\n\nHTML:\n{html_clean}"
     data = llm_json(oai, pob, system, user, LISTING_SCHEMA,
@@ -2017,6 +2136,191 @@ def extract_listing(oai, pob, html_clean, listado_url):
         if it.get("imagen_url"):
             it["imagen_url"] = urljoin(listado_url, it["imagen_url"])
     return items
+
+
+def extract_listing_pdf_vision(oai, pob, pngs: list, pdf_url: str) -> list:
+    """Extrae eventos de las páginas RENDERIZADAS de un PDF (visión).
+
+    Complementa a la capa de texto: cubre carteles, texto convertido a
+    curvas vectoriales (outlines) e imágenes con texto, que ningún extractor
+    de texto (pypdf/PyMuPDF) puede leer. Devuelve items LISTING_SCHEMA."""
+    today = date.today().isoformat()
+    system = (
+        "Eres un extractor de eventos de agendas municipales catalanas/españolas. "
+        f"Hoy es {today}. Las imágenes adjuntas son páginas de un PDF de "
+        "programación municipal (festes, agenda d'activitats, cartelera). "
+        "Lee CADA página visualmente y devuelve los eventos en JSON.\n"
+        "Reglas estrictas:\n"
+        "(1) Fechas absolutas YYYY-MM-DD. Convierte relativas y catalanas "
+        "usando la fecha de hoy y el año del documento si aparece.\n"
+        "(2) EXHAUSTIVIDAD VISUAL: extrae TODOS los eventos y actividades "
+        "visibles, incluidos los que aparecen solo dentro de carteles, "
+        "fotos de programación o bloques con tipografía decorativa.\n"
+        "(3) RANGOS: 'Del X al Y de mes' es un rango continuo: fecha_inicio=X, "
+        "fecha_fin=Y. No lo descartes aunque X ya haya pasado si Y es futuro.\n"
+        "(4) ACTOS DENTRO DE RANGOS: si una exposición menciona un acto puntual "
+        "con fecha propia ('visita guiada el 20 de setembre a les 12 h'), "
+        "extráelo TAMBIÉN como evento separado.\n"
+        "(5) Actividades semanales recurrentes ('dilluns de 16 a 19 h'): "
+        "fecha_inicio = próxima ocurrencia futura del día indicado, "
+        "dias_semana = todos los días indicados (['lunes','miércoles']), "
+        "fecha_fin = null. Si el texto menciona CUALQUIER día de la semana "
+        "(dilluns, dimarts, dissabte...), dias_semana es OBLIGATORIO.\n"
+        "(6) url_detalle e imagen_url: null (es un PDF, no hay URLs por evento).\n"
+        "(7) NO extraigas: cabeceras de sección o categoría ('Arts i manualitats', "
+        "'ALTRES ACTIVITATS'...), nombres de entidades/organizadores aislados, "
+        "ni notas logísticas (períodos de inscripción, festivos, avisos). Solo "
+        "eventos y actividades con título propio.\n"
+        "(8) NO inventes rangos de fechas a partir del título del documento "
+        "('GENER - DESEMBRE 2026') ni de los períodos de precio ('54€ gener - "
+        "juny'): NO son fechas del evento. fecha_fin SOLO si el texto de ESA "
+        "actividad la indica explícitamente ('Del X al Y', 'fins al Y', "
+        "'finalització: 19 de desembre'). Si no, fecha_fin = null.\n"
+        "(9) Fechas de actos puntuales: deben leerse claramente en la página y "
+        "pertenecer a ESE acto; nunca asignes la fecha de un acto a otro. Si "
+        "no distingues la fecha con certeza, no extraigas el acto."
+    )
+    items = []
+    for i in range(0, len(pngs), PDF_VISION_PAGINAS_POR_LLAMADA):
+        lote = pngs[i:i + PDF_VISION_PAGINAS_POR_LLAMADA]
+        user = (f"PDF: {pdf_url}\n"
+                f"Páginas {i + 1} a {i + len(lote)} adjuntas como imágenes. "
+                f"Extrae todos los eventos y actividades visibles.")
+        data = llm_json_vision(oai, pob, system, user, lote, LISTING_SCHEMA,
+                               op="listado-vision",
+                               context=f"{pdf_url} pág {i + 1}-{i + len(lote)}")
+        items.extend(data.get("eventos", []))
+    return items
+
+
+def _item_vision_fiable(it: dict) -> tuple:
+    """Filtro determinista anti-alucinación para items de VISIÓN de un PDF.
+
+    Un rango > 62 días sin hora de inicio es casi siempre una cabecera de
+    sección, un período administrativo o una actividad sin fecha determinable
+    (el modelo lo inventa a partir del título del documento), no un evento
+    mostrable: se descarta."""
+    fi = (it.get("fecha_inicio") or "").strip()
+    ff = (it.get("fecha_fin") or "").strip()
+    if fi and ff:
+        try:
+            d1 = date.fromisoformat(fi[:10])
+            d2 = date.fromisoformat(ff[:10])
+            if (d2 - d1).days > 62 and not it.get("hora_inicio"):
+                return False, "rango >62d sin hora (cabecera/período)"
+        except ValueError:
+            pass
+    return True, ""
+
+
+def _items_pdf_vision(oai, http, pob, pdf_url: str):
+    """Descarga un PDF y extrae sus eventos por VISIÓN (páginas renderizadas).
+
+    Devuelve None si está desactivado (PDF_VISION=0) o no se puede procesar
+    (descarga/render fallido) -> el llamador debe usar la capa de texto.
+    Devuelve lista (posiblemente vacía) si la visión funcionó."""
+    if not PDF_VISION:
+        return None
+    try:
+        r = http.get(pdf_url, follow_redirects=True)
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        log.warning(f"    PDF visión: no se pudo descargar {pdf_url}: {e}")
+        return None
+    pngs = pdf_bytes_a_imagenes(r.content, max_paginas=PDF_VISION_MAX_PAGINAS)
+    if not pngs:
+        return None
+    log.info(f"    PDF visión: {len(pngs)} página(s) renderizada(s), "
+             f"extrayendo eventos por imagen...")
+    items = extract_listing_pdf_vision(oai, pob, pngs, pdf_url)
+    # Dedupe intra-visión (el modelo puede repetir un acto entre lotes) y
+    # filtro anti-alucinación determinista.
+    vistos = set()
+    out = []
+    for it in items:
+        clave = (normalize_title(it.get("titulo") or ""),
+                 (it.get("fecha_inicio") or "").strip(),
+                 (it.get("hora_inicio") or "").strip())
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        ok, motivo = _item_vision_fiable(it)
+        if not ok:
+            log.info(f"      visión descartado: "
+                     f"'{(it.get('titulo') or '')[:60]}' ({motivo})")
+            continue
+        out.append(it)
+    return out
+
+
+_DIAS_SEMANA = {
+    "lunes": 0, "dilluns": 0, "monday": 0,
+    "martes": 1, "dimarts": 1, "tuesday": 1,
+    "miercoles": 2, "dimecres": 2, "wednesday": 2,
+    "jueves": 3, "dijous": 3, "thursday": 3,
+    "viernes": 4, "divendres": 4, "friday": 4,
+    "sabado": 5, "dissabte": 5, "saturday": 5,
+    "domingo": 6, "diumenge": 6, "sunday": 6,
+}
+
+
+def _proximas_ocurrencias_semanales(dias) -> list:
+    """Próxima fecha (hoy incluido) de cada día de la semana dado.
+    Acepta nombres en ES/CA/EN, con o sin acentos."""
+    hoy = date.today()
+    fechas = set()
+    for d in dias or []:
+        wd = _DIAS_SEMANA.get(strip_accents(str(d).strip().lower()))
+        if wd is None:
+            continue
+        fechas.add(hoy + timedelta(days=(wd - hoy.weekday()) % 7))
+    return sorted(fechas)
+
+
+def _sanear_rango_largo_pdf(it: dict) -> None:
+    """Rangos > 62 días en items de PDF: el LLM suele inventarlos a partir de
+    los períodos del documento ('54€ gener - juny', 'GENER - DESEMBRE 2026'),
+    que NO son fechas del evento. Se elimina fecha_fin y, si hay dias_semana,
+    fecha_inicio se recoloca en la próxima ocurrencia real."""
+    fi = (it.get("fecha_inicio") or "").strip()
+    ff = (it.get("fecha_fin") or "").strip()
+    if not (fi and ff):
+        return
+    try:
+        d1 = date.fromisoformat(fi[:10])
+        d2 = date.fromisoformat(ff[:10])
+    except ValueError:
+        return
+    if (d2 - d1).days <= 62:
+        return
+    log.info(f"      rango largo saneado en "
+             f"'{(it.get('titulo') or '')[:50]}': {fi}→{ff} eliminado")
+    it["fecha_fin"] = None
+    fechas = _proximas_ocurrencias_semanales(it.get("dias_semana"))
+    if fechas:
+        it["fecha_inicio"] = fechas[0].isoformat()
+
+
+def _recolocar_recurrente_pasado(it: dict) -> None:
+    """Actividad semanal (dias_semana) cuya fecha_inicio quedó en pasado
+    (p.ej. el modelo usó el inicio de período '15 de setembre'): se recoloca
+    en la próxima ocurrencia real del día de la semana correspondiente."""
+    dias = it.get("dias_semana") or []
+    fi = (it.get("fecha_inicio") or "").strip()
+    if not dias or not fi:
+        return
+    try:
+        d1 = date.fromisoformat(fi[:10])
+    except ValueError:
+        return
+    if d1 >= date.today():
+        return
+    fechas = _proximas_ocurrencias_semanales(dias)
+    if fechas:
+        log.info(f"      actividad semanal recolocada: "
+                 f"'{(it.get('titulo') or '')[:50]}': {fi} → {fechas[0].isoformat()}")
+        it["fecha_inicio"] = fechas[0].isoformat()
+        it["fecha_fin"] = None
 
 
 def extract_detail(oai, pob, html_clean, url):
@@ -2218,10 +2522,25 @@ def procesar_item_evento(oai, http, pob, cp, it, listado_url, detail_cache, ctx)
         fuente_url=it.get("url_detalle") or listado_url,
         fuente_listado=listado_url,
         fecha_inicio=(it.get("fecha_inicio") or "").strip(),
+        fecha_fin=(it.get("fecha_fin") or "").strip() or None,
         hora_inicio=it.get("hora_inicio"),
         hora_fin=it.get("hora_fin"),
         imagenes=[it["imagen_url"]] if it.get("imagen_url") else [],
     )
+
+    # Actividad semanal recurrente (típico de agendas anuales en PDF):
+    # una sesión en la próxima ocurrencia de cada día de la semana.
+    # Si luego hay página de detalle con horarios_discretos, estos mandan.
+    dias = it.get("dias_semana") or []
+    if dias:
+        fechas = _proximas_ocurrencias_semanales(dias)
+        if fechas:
+            cand.horarios_extra = [
+                Horario(f.isoformat(), None, cand.hora_inicio, cand.hora_fin)
+                for f in fechas
+            ]
+            cand.fecha_inicio = fechas[0].isoformat()
+            cand.fecha_fin = None
 
     url_det = it.get("url_detalle")
     if url_det and same_or_sub_domain(url_det, listado_url):
@@ -2353,15 +2672,33 @@ def scrape_source(oai, http, pob, cp, listado_url, dry_run,
     for page_url, page_html in paginas:
         if max_nuevos is not None and len(candidates) >= max_nuevos:
             break
-        items = extract_listing_jsonld(page_html, page_url)
-        if items is not None:
-            log.info(f"    {len(items)} eventos vía JSON-LD (sin LLM) {page_url}")
-        else:
-            html_clean = html_a_texto_enlaces(page_html)
-            log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars "
-                     f"texto+enlaces) {page_url}")
-            items = extract_listing(oai, pob, html_clean, page_url)
-            log.info(f"    {len(items)} eventos en el listado")
+        items = None
+        if es_url_pdf(page_url):
+            # PDF: la VISIÓN es la vía primaria. La capa de texto de estos PDF
+            # (maquetas a columnas, carteles, texto convertido a curvas) llega
+            # al LLM desordenada o incompleta y produce fechas inventadas; la
+            # imagen renderizada se lee con el layout real. La capa de texto
+            # queda como fallback si la visión no está disponible.
+            items = _items_pdf_vision(oai, http, pob, page_url)
+            if items is not None:
+                log.info(f"    {len(items)} eventos vía visión PDF {page_url}")
+        if items is None:
+            items = extract_listing_jsonld(page_html, page_url)
+            if items is not None:
+                log.info(f"    {len(items)} eventos vía JSON-LD (sin LLM) {page_url}")
+            else:
+                html_clean = html_a_texto_enlaces(page_html)
+                log.info(f"    Extrayendo listado con LLM ({len(html_clean):,} chars "
+                         f"texto+enlaces) {page_url}")
+                items = extract_listing(oai, pob, html_clean, page_url)
+                log.info(f"    {len(items)} eventos en el listado")
+        if es_url_pdf(page_url):
+            # Saneado determinista: rangos largos inventados a partir de los
+            # períodos del documento no son fechas de evento; y las semanales
+            # con fecha en pasado se recolocan en su próxima ocurrencia.
+            for it in items:
+                _sanear_rango_largo_pdf(it)
+                _recolocar_recurrente_pasado(it)
 
         for it in items:
             if max_nuevos is not None and len(candidates) >= max_nuevos:
