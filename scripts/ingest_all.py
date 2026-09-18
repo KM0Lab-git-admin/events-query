@@ -1059,7 +1059,10 @@ def buscar_evento_existente(titulo: str, existentes: list, umbral: float,
                             lugar: str = "", fecha: str = ""):
     """Devuelve el {id, ...} del evento ya en BD que casa con el candidato, o
     None si es nuevo. Dos criterios (los mismos que la fusión intra-run):
-      1. Título similar (>= umbral).
+      1. Título similar (>= umbral) Y fecha del candidato dentro del rango del
+         existente (±3 días). Sin fecha comparable no hay match por título:
+         evita fusionar títulos genéricos de ediciones distintas
+         ("Concert de Nadal" de 2025 vs 2026).
       2. Mismo lugar normalizado + fecha dentro del rango del evento (±1 día).
          Cubre el mismo evento titulado distinto en otra fuente/otro run
          (caso real: 'Campionat de volei' vs 'La Platja de l'Astillero acull
@@ -1073,6 +1076,11 @@ def buscar_evento_existente(titulo: str, existentes: list, umbral: float,
             pass
     for e in existentes:
         if titulos_similares(titulo, e["titulo"], umbral):
+            if fecha_d and e.get("fmin"):
+                fmin, fmax = e["fmin"], e["fmax"] or e["fmin"]
+                if (fmin - timedelta(days=3)) <= fecha_d <= (fmax + timedelta(days=3)):
+                    return e
+                continue
             return e
         if lugar_norm and fecha_d and e.get("lugar") and e.get("fmin"):
             if normalize_place(e["lugar"]) == lugar_norm:
@@ -1893,7 +1901,10 @@ def extract_listing(oai, pob, html_clean, listado_url):
         "devuélvelos TODOS como entradas separadas: son sesiones o funciones distintas "
         "del mismo evento (p.ej. tres funciones de teatro, un ciclo de conciertos).\n"
         "(4) URLs absolutas y reales. Si no encuentras URL clara, null. NUNCA inventes.\n"
-        "(5) Solo eventos futuros o en curso."
+        "(5) Solo eventos futuros o en curso.\n"
+        "(6) EXHAUSTIVIDAD: devuelve TODOS los eventos del listado, no solo los "
+        "destacados. Incluye talleres, actividades recurrentes, sesiones de "
+        "entidades locales, cursos y actividades deportivas o infantiles."
     )
     user = f"URL listado: {listado_url}\n\nHTML:\n{html_clean}"
     data = llm_json(oai, pob, system, user, LISTING_SCHEMA,
@@ -3070,7 +3081,10 @@ def clasificar_items(oai, pob, html_clean, url, hint: str) -> list:
         "a la que se puede asistir), una NOTICIA (información/comunicado) o "
         "DESCARTAR (menús, banners, sin valor). Reglas: fechas absolutas "
         "YYYY-MM-DD; URLs absolutas y reales, null si no hay (NUNCA inventes); "
-        "un item = una entrada, no dupliques."
+        "un item = una entrada, no dupliques. "
+        "IMPORTANTE: si un item anuncia una actividad con fecha a la que se "
+        "puede asistir, clasifícalo EVENTO aunque tenga formato de noticia; "
+        "reserva DESCARTAR para contenido sin valor asistencial real."
     )
     user = f"URL listado: {url}\n\nHTML:\n{html_clean}"
     data = llm_json(oai, pob, system, user, CLASIFICACION_SCHEMA,
