@@ -68,8 +68,7 @@
       "url": "https://www.esdeveniments.cat/malgrat-de-mar",
       "prioridad": 1,
       "tipo_contenido": "EVENTOS",
-      "activa": false,
-      "notas": "Listado vacío en 2026-08; reactivar cuando vuelva a publicar actos."
+      "notas": "Reactivada 2026-09-18: el listado vuelve a publicar actos (verificado en vivo)."
     },
     {
       "tipo": "AGREGADOR",
@@ -187,6 +186,38 @@
       "tipo_contenido": "EVENTOS",
       "activa": false,
       "notas": "Listado vacío en 2026-08."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Festa Major Sant Roc 2026 (PDF)",
+      "url": "https://www.ajmalgrat.cat/media/repository/noticies/2026/Documents/WEB_MALGRAT_DE_MAR-_FESTA_MAJOR_SANT_ROC_2026_-_16X16_V4.pdf",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Programa completo de la festa major (pypdf -> texto -> LLM, mismo patron que el PDF del Centre Civic)."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Marina 360 — Malgrat de Mar",
+      "url": "https://marina360.cat/noticies-malgrat-de-mar/",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO",
+      "notas": "Portal local de Radio Marina: agenda y noticias de actos de Malgrat."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Grup de Teatre Germanor",
+      "url": "https://grupgermanor.com/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Temporada de teatre (Concurs Vicenc Bayarri oct-marc, estrenos, Pastorets)."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — agenda cultural",
+      "url": "https://www.turismemaresme.cat/ca/descobreix/agenda/cat/9/cultural",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Vista por categoria cultural del agregador comarcal; el pipeline filtra items que mencionan Malgrat."
     },
     {
       "tipo": "RED_SOCIAL_PERFIL",
