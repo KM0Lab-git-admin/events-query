@@ -137,7 +137,7 @@ def set_llm_model(modelo: str):
 
 # Tope de caracteres de texto enviados por llamada LLM (tras convertir el HTML
 # a texto+enlaces). Protege de páginas monstruosas; configurable por env.
-LLM_MAX_INPUT_CHARS = int(os.getenv("LLM_MAX_INPUT_CHARS", "20000"))
+LLM_MAX_INPUT_CHARS = int(os.getenv("LLM_MAX_INPUT_CHARS", "30000"))
 
 DEFAULT_EVENTS_API_BASE_URL = "https://eventquery.uat.km0lab.com"
 
@@ -150,7 +150,7 @@ RATIO_VERTICAL_MAX = 0.80
 HTTP_TIMEOUT = 30
 HTTP_USER_AGENT = "KM0EventsIngestion/0.2"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
-MAX_DETAIL_PAGES_PER_SOURCE = 60  # tope de seguridad de coste por link
+MAX_DETAIL_PAGES_PER_SOURCE = 100  # tope de seguridad de coste por link
 
 # Noticias: días de vigencia desde su publicación. Solo se ingieren noticias
 # publicadas dentro de la ventana, y al caducar se BORRAN físicamente de la BD
@@ -167,13 +167,13 @@ TELEGRAM_MAX_DIAS = 14  # no interesa histórico más antiguo
 # Listados web (agenda municipal, historic-agenda, calendarios Diba):
 # páginas ?pag= / ?page= y meses extra de cercaCalendari. Tope para no
 # gastar LLM en archivo de 2019.
-LISTADO_MAX_PAGINAS = int(os.getenv("LISTADO_MAX_PAGINAS", "4"))
+LISTADO_MAX_PAGINAS = int(os.getenv("LISTADO_MAX_PAGINAS", "8"))
 _PAGINA_QS_RE = re.compile(r"[?&]pag(?:e)?=(\d+)", re.I)
 _CALENDARIO_MES_RE = re.compile(r"/cercaCalendari(?:/(\d{1,2})/(\d{4}))?", re.I)
 
 # Instagram sin Apify: intento de perfil público + fallback de carteles locales.
 INSTAGRAM_MEDIA_DIR = Path(__file__).resolve().parent / "fuentes" / "instagram_media"
-INSTAGRAM_MAX_POSTS = 12
+INSTAGRAM_MAX_POSTS = 20
 INSTAGRAM_IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 LOCAL_IMAGE_PREFIX = "localfile:"
 
