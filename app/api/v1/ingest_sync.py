@@ -67,8 +67,17 @@ async def upload_event_image(
             detail="Archivo demasiado grande",
         )
 
-    await image_store.ensure_blob_table(db_service)
-    public_path = await image_store.save_image(db_service, event_id, filename, content)
+    try:
+        await image_store.ensure_blob_table(db_service)
+        public_path = await image_store.save_image(db_service, event_id, filename, content)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Fallo guardando imagen de ingesta %s/%s", event_id, filename)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
     logger.info("Imagen de ingesta guardada: %s (%d bytes)", public_path, len(content))
 
     return {"ok": True, "path": public_path, "bytes": len(content)}
