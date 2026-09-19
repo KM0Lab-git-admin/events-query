@@ -3,8 +3,8 @@ Categories endpoint - List available event categories.
 """
 
 import logging
-from typing import Dict, Any, List
-from fastapi import APIRouter, HTTPException, status, Request
+from typing import Dict, Any, List, Optional
+from fastapi import APIRouter, HTTPException, status, Request, Query
 from fastapi.responses import ORJSONResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -24,8 +24,8 @@ router = APIRouter()
 @router.get(
     "/categories",
     response_class=ORJSONResponse,
-    summary="List event categories",
-    description="Get all available event categories with counts",
+    summary="List event categories in use",
+    description="Get event categories that have at least one active event, optionally filtered by town",
     responses={
         200: {
             "description": "Categories retrieved successfully",
@@ -58,44 +58,59 @@ router = APIRouter()
     }
 )
 @limiter.limit("100/minute")
-async def list_categories(request: Request) -> Dict[str, Any]:
+async def list_categories(
+    request: Request,
+    poblacion: Optional[str] = Query(
+        None, description="Filter by town name (e.g. 'Malgrat de Mar')"
+    ),
+) -> Dict[str, Any]:
     """
-    List all available event categories.
-    
+    List event categories that have at least one active event.
+
+    Categories without active events are never returned.
+
     **Rate Limit:** 100 requests per minute
-    
-    **Caching:** Results cached for 1 hour
-    
+
+    **Query Params:**
+    - `poblacion` (optional): only count active events from that town
+
     **Returns:**
     - List of categories with:
       - ID and slug
       - Names in Spanish and Catalan
-      - Event count per category
+      - Active event count per category
     - Total number of categories
-    
+
     **Example:**
     ```
     GET /api/v1/categories
+    GET /api/v1/categories?poblacion=Malgrat%20de%20Mar
     ```
     """
     try:
         query = """
-        SELECT 
+        SELECT
             c.ID_Categoria,
             c.Slug,
             c.Nombre_ES,
             c.Nombre_CAT,
-            COUNT(DISTINCT ec.ID_Unico_Evento) as event_count
+            COUNT(DISTINCT em.ID_Unico_Evento) as event_count
         FROM CATEGORIAS c
-        LEFT JOIN EVENTO_CATEGORIAS ec ON c.ID_Categoria = ec.ID_Categoria
-        LEFT JOIN EVENTOS_MASTER em ON ec.ID_Unico_Evento = em.ID_Unico_Evento AND em.Estado = 'ACTIVO'
+        INNER JOIN EVENTO_CATEGORIAS ec ON c.ID_Categoria = ec.ID_Categoria
+        INNER JOIN EVENTOS_MASTER em ON ec.ID_Unico_Evento = em.ID_Unico_Evento AND em.Estado = 'ACTIVO'
+        """
+        params: tuple = ()
+        if poblacion:
+            query += "\n        AND em.Poblacion_Nombre = %s\n"
+            params = (poblacion,)
+        query += """
         GROUP BY c.ID_Categoria, c.Slug, c.Nombre_ES, c.Nombre_CAT
         ORDER BY c.Nombre_ES ASC
         """
-        
+
         async with db_service.get_connection() as conn:
             async with conn.cursor() as cursor:
-                await cursor.execute(query)
+                await cursor.execute(query, params)
                 rows = await cursor.fetchall()
                 
                 categorias = []
