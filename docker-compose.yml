@@ -41,6 +41,9 @@ services:
     volumes:
       - ./app:/app/app
       - ./scripts:/app/scripts
+      # Imágenes persistidas por la ingesta (scripts/ingest_all.py escribe en
+      # el host); sin este mount el endpoint /static/images devuelve 404.
+      - ./static/images:/app/static/images
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
