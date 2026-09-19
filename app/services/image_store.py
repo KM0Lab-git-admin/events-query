@@ -84,26 +84,35 @@ def write_to_disk(event_id: str, filename: str, content: bytes, root: Optional[P
     return path
 
 
+# MySQL 8.0.19+ alias (VALUES() está deprecado; Railway corre 9.7).
+# UNHEX(%s) evita interpolar bytes JPEG con aiomysql (`query % args`),
+# que en el PUT de ingesta acababa en TypeError: 'str' object is not callable.
+_BLOB_UPSERT_SQL = """
+INSERT INTO IMAGENES_BLOB (ID_Unico, Nombre_Archivo, Contenido, Content_Type, Bytes)
+VALUES (%s, %s, UNHEX(%s), %s, %s) AS incoming
+ON DUPLICATE KEY UPDATE
+  Contenido = incoming.Contenido,
+  Content_Type = incoming.Content_Type,
+  Bytes = incoming.Bytes
+"""
+
+
 async def ensure_blob_table(db) -> None:
-    await db.execute_query(_CREATE_TABLE_SQL, fetch_all=False)
+    if hasattr(db, "execute_insert"):
+        await db.execute_insert(_CREATE_TABLE_SQL)
+    else:
+        await db.execute_query(_CREATE_TABLE_SQL, fetch_all=False)
 
 
 async def save_image(db, event_id: str, filename: str, content: bytes) -> str:
     """Persiste en disco + MySQL. Devuelve la URL pública relativa."""
     write_to_disk(event_id, filename, content)
     ctype = content_type_for(filename)
-    await db.execute_query(
-        """
-        INSERT INTO IMAGENES_BLOB (ID_Unico, Nombre_Archivo, Contenido, Content_Type, Bytes)
-        VALUES (%s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-          Contenido=VALUES(Contenido),
-          Content_Type=VALUES(Content_Type),
-          Bytes=VALUES(Bytes)
-        """,
-        (event_id, filename, content, ctype, len(content)),
-        fetch_all=False,
-    )
+    params = (event_id, filename, content.hex(), ctype, len(content))
+    if hasattr(db, "execute_insert"):
+        await db.execute_insert(_BLOB_UPSERT_SQL, params)
+    else:
+        await db.execute_query(_BLOB_UPSERT_SQL, params, fetch_all=False)
     return f"/static/images/{event_id}/{filename}"
 
 
