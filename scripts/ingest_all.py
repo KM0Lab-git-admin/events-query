@@ -92,6 +92,14 @@ VARIABLES DE ENTORNO (.env)
     PDF_VISION_DPI=150      Resolución de renderizado de páginas PDF.
     PDF_VISION_MAX_PAGINAS=30   Tope de páginas renderizadas por PDF.
     PDF_VISION_PAGINAS_POR_LLAMADA=4   Páginas por llamada LLM de visión.
+    IMAGE_GEN_ENABLED=1|0     Genera con IA una portada para eventos que se
+                              quedan sin imagen (OpenAI Images API). Por
+                              defecto activada.
+    IMAGE_GEN_MODEL=gpt-image-1-mini   Modelo de generación de imágenes.
+    IMAGE_GEN_QUALITY=low     Calidad (low|medium|high).
+    IMAGE_GEN_SIZE=1536x1024  Tamaño (apaisado 3:2 para las cards).
+    IMAGE_GEN_MAX_POR_RUN=20  Tope de imágenes generadas por ejecución
+                              (control de coste).
 """
 
 import argparse
@@ -158,6 +166,25 @@ HTTP_TIMEOUT = 30
 HTTP_USER_AGENT = "KM0EventsIngestion/0.2"
 MAX_IMAGE_SIZE_BYTES = 20 * 1024 * 1024
 MAX_DETAIL_PAGES_PER_SOURCE = 100  # tope de seguridad de coste por link
+
+# Generación de imágenes con IA (OpenAI Images API) para eventos que se quedan
+# sin imagen tras la descarga normal. Se genera UNA portada por evento en la
+# propia ingesta y se persiste como una imagen más (BINARIOS_STORAGE con
+# URL_Original_Externa = "generated:<modelo>").
+IMAGE_GEN_ENABLED = os.getenv("IMAGE_GEN_ENABLED", "1").lower() not in ("0", "false", "no")
+IMAGE_GEN_MODEL = os.getenv("IMAGE_GEN_MODEL", "gpt-image-1-mini")
+IMAGE_GEN_QUALITY = os.getenv("IMAGE_GEN_QUALITY", "low")   # low|medium|high
+IMAGE_GEN_SIZE = os.getenv("IMAGE_GEN_SIZE", "1536x1024")   # apaisado 3:2 (cards)
+IMAGE_GEN_MAX_POR_RUN = int(os.getenv("IMAGE_GEN_MAX_POR_RUN", "20"))
+# La API devuelve PNG pesado; se reencodea a JPEG por debajo de este tope.
+IMAGE_GEN_MAX_BYTES = int(os.getenv("IMAGE_GEN_MAX_BYTES", str(400 * 1024)))
+
+# Tarifa oficial gpt-image-1-mini (USD/imagen): calidad -> (1024x1024, otros tamaños)
+IMAGE_GEN_PRECIOS_USD = {
+    "low": (0.005, 0.006),
+    "medium": (0.011, 0.015),
+    "high": (0.036, 0.052),
+}
 
 # Noticias: días de vigencia desde su publicación. Solo se ingieren noticias
 # publicadas dentro de la ventana, y al caducar se BORRAN físicamente de la BD
@@ -462,8 +489,8 @@ class CostTracker:
             "tokens_in": 0,        # tokens de entrada NO cacheados
             "tokens_cached": 0,    # tokens de entrada cacheados (tarifa reducida)
             "tokens_out": 0,       # tokens de salida
-            "coste_extra": 0.0,    # coste con tarifa propia (embeddings)
-            "imagenes": 0, "eventos": 0, "noticias": 0,
+            "coste_extra": 0.0,    # coste con tarifa propia (embeddings, imagen IA)
+            "imagenes": 0, "imagenes_ia": 0, "eventos": 0, "noticias": 0,
         }
 
     def _bucket(self, store, key):
@@ -507,6 +534,17 @@ class CostTracker:
     def add_imagen(self, pob, n=1):
         self._bucket(self.by_pob, pob)["imagenes"] += n
         self.global_stats["imagenes"] += n
+
+    def add_imagen_generada(self, pob, coste_usd: float):
+        """Una imagen generada con IA (tarifa por imagen, no por tokens).
+        El coste va en coste_extra con su tarifa propia, como los embeddings."""
+        for b in (self._bucket(self.by_pob, pob),
+                  self._bucket(self.by_op, "imagen_ia"),
+                  self._bucket(self.by_pob_op, (pob, "imagen_ia")),
+                  self.global_stats):
+            b["llm_calls"] += 1
+            b["imagenes_ia"] += 1
+            b["coste_extra"] += coste_usd
 
     def add_evento(self, pob, n=1):
         self._bucket(self.by_pob, pob)["eventos"] += n
@@ -565,7 +603,8 @@ class CostTracker:
                  f"{g['tokens_cached']:,} (cacheados) = "
                  f"{g['tokens_in'] + g['tokens_cached']:,}")
         log.info(f"Tokens salida   : {g['tokens_out']:,}")
-        log.info(f"Imágenes descargadas: {g['imagenes']:,}")
+        log.info(f"Imágenes persistidas: {g['imagenes']:,} "
+                 f"(generadas por IA: {g['imagenes_ia']:,})")
         log.info(f"Eventos persistidos : {g['eventos']:,}")
         log.info(f"Noticias persistidas: {g['noticias']:,}")
         log.info("-" * W)
@@ -3025,6 +3064,131 @@ def _comprimir_imagen_si_hace_falta(content: bytes,
     raise ValueError(f"tamaño sospechoso tras comprimir ({len(out)} bytes)")
 
 
+# ---------------------------------------------------------------------------
+# IMÁGENES GENERADAS POR IA (eventos sin imagen)
+# ---------------------------------------------------------------------------
+
+# Escena sugerida por categoría (slug de CATEGORIAS) para el prompt de imagen.
+_IMAGE_GEN_ESCENAS = {
+    "cultura": "warm cultural scene, art and heritage atmosphere",
+    "cine": "cozy cinema atmosphere, film projector light",
+    "teatro": "theatre stage with warm spotlights and red curtains",
+    "exposiciones": "bright art gallery with framed artwork on walls",
+    "charlas": "auditorium with a welcoming speaker stage",
+    "lectura": "cozy library corner with books",
+    "deportes": "dynamic outdoor sports scene, motion and energy",
+    "ocio": "festive street atmosphere, colorful and joyful",
+    "fiestas-mayores": "festive town celebration, bunting and warm evening lights",
+    "ferias": "lively outdoor market fair with stalls",
+    "infantil": "cheerful children's activity scene, bright and playful",
+    "formacion": "bright workshop classroom, learning materials on tables",
+    "gastronomia": "Mediterranean food market scene, fresh local products",
+    "musica": "live music concert atmosphere, stage lights",
+    "naturaleza": "Mediterranean coastal nature, pine trees and sea",
+}
+_IMAGE_GEN_ESCENA_DEFAULT = "Mediterranean coastal town life, Costa Brava"
+
+
+def _construir_prompt_imagen(ev: MergedEvent) -> str:
+    """Prompt en inglés (mejor resultado en los modelos de imagen) para una
+    portada editorial del evento. Sin texto en la imagen: el texto generado
+    por IA sale deformado y ensucia la card."""
+    partes = [
+        f'Editorial cover photo for a local event titled "{ev.titulo}"',
+        f"in {ev.poblacion}, Maresme, Catalonia, Spain.",
+    ]
+    if ev.lugar:
+        partes.append(f"Venue: {ev.lugar}.")
+    tema = (ev.desc_corta or ev.descripcion_larga or "").strip()[:300]
+    if tema:
+        partes.append(f"About: {tema}")
+    escena = _IMAGE_GEN_ESCENAS.get(ev.categoria_principal,
+                                    _IMAGE_GEN_ESCENA_DEFAULT)
+    partes.append(f"Scene: {escena}.")
+    partes.append("Landscape composition, vibrant but natural, high quality. "
+                  "No text, no words, no letters, no numbers, no logos, "
+                  "no watermarks, no posters with writing. "
+                  "No identifiable real people.")
+    return " ".join(partes)
+
+
+def _image_gen_precio_usd() -> float:
+    cuadrada, otro = IMAGE_GEN_PRECIOS_USD.get(IMAGE_GEN_QUALITY,
+                                               IMAGE_GEN_PRECIOS_USD["low"])
+    return cuadrada if IMAGE_GEN_SIZE == "1024x1024" else otro
+
+
+def generar_imagen_ia_evento(oai, ev: MergedEvent) -> Optional[bytes]:
+    """Genera una portada con la Images API de OpenAI. Devuelve los bytes
+    (recomprimidos a JPEG ligero) o None si la API falla: nunca lanza."""
+    try:
+        resp = oai.images.generate(model=IMAGE_GEN_MODEL,
+                                   prompt=_construir_prompt_imagen(ev),
+                                   size=IMAGE_GEN_SIZE,
+                                   quality=IMAGE_GEN_QUALITY,
+                                   n=1)
+        b64 = resp.data[0].b64_json if resp.data else None
+        if not b64:
+            log.warning("    Imagen IA: respuesta sin b64_json")
+            return None
+        content = base64.b64decode(b64)
+        # La API devuelve PNG pesado -> JPEG ligero para disco/blob
+        return _comprimir_imagen_si_hace_falta(content, max_bytes=IMAGE_GEN_MAX_BYTES)
+    except Exception as exc:
+        log.warning(f"    Imagen IA no generada ({type(exc).__name__}): {exc}")
+        return None
+
+
+def _persistir_imagen_evento(conn, http, ev: MergedEvent, pob,
+                             target: IngestTarget, content: bytes,
+                             orden: int, url_origen: str,
+                             existing: Optional[dict] = None,
+                             fname_prefix: Optional[str] = None) -> None:
+    """Valida, comprime y persiste UNA imagen de evento: disco local o PUT
+    remoto + IMAGENES_BLOB, y metadatos en BINARIOS_STORAGE (si ya existe fila
+    solo repone el fichero). Compartida por imágenes descargadas y generadas."""
+    content = _comprimir_imagen_si_hace_falta(content)
+    if not (100 < len(content) <= MAX_IMAGE_SIZE_BYTES):
+        raise ValueError(f"tamaño sospechoso ({len(content)} bytes)")
+    img = Image.open(io.BytesIO(content)); img.verify()
+    img = Image.open(io.BytesIO(content))
+    w, h = img.size
+    fmt = (img.format or "JPEG").upper()
+    ext = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}.get(fmt, "jpg")
+    tipo = {"JPEG": "JPG", "PNG": "PNG", "WEBP": "WEBP"}.get(fmt, "JPG")
+    checksum = hashlib.sha256(content).hexdigest()
+    if existing:
+        fname = existing["Nombre_Archivo"]
+    else:
+        prefix = fname_prefix if fname_prefix is not None else f"{orden:02d}"
+        fname = f"{prefix}_{checksum[:12]}.{ext}"
+    if target.store_images_locally:
+        event_dir = IMAGES_DIR / ev.id_unico
+        event_dir.mkdir(parents=True, exist_ok=True)
+        (event_dir / fname).write_bytes(content)
+    else:
+        try:
+            _upload_image_remote(http, target, ev.id_unico, fname, content)
+        except Exception as upload_exc:
+            log.warning(f"    Upload HTTP falló ({upload_exc}); blob en BD")
+        ctype = {"JPG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(tipo)
+        try:
+            _upsert_imagen_blob(conn, ev.id_unico, fname, content, ctype)
+        except Exception as blob_exc:
+            log.warning(f"    IMAGENES_BLOB falló: {blob_exc}")
+    if existing:
+        return
+    local_url = f"/static/images/{ev.id_unico}/{fname}"
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO BINARIOS_STORAGE
+            (ID_Unico_Evento, Nombre_Archivo, Tipo_Archivo, URL_Almacenamiento_Nube,
+             Es_Principal, Orden, Ancho_Px, Alto_Px, Orientacion, URL_Original_Externa, Checksum_SHA256)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (ev.id_unico, fname, tipo, local_url, 1 if orden == 0 else 0,
+             orden, w, h, determinar_orientacion(w, h), url_origen, checksum))
+    COST.add_imagen(pob)
+
+
 def descargar_imagenes(conn, http, ev: MergedEvent, pob, target: IngestTarget):
     for orden, url in enumerate(ev.imagenes):
         with conn.cursor() as cur:
@@ -3040,44 +3204,43 @@ def descargar_imagenes(conn, http, ev: MergedEvent, pob, target: IngestTarget):
         ):
             continue
         try:
-            content = _comprimir_imagen_si_hace_falta(_leer_bytes_imagen(http, url))
-            if not (100 < len(content) <= MAX_IMAGE_SIZE_BYTES):
-                raise ValueError(f"tamaño sospechoso ({len(content)} bytes)")
-            img = Image.open(io.BytesIO(content)); img.verify()
-            img = Image.open(io.BytesIO(content))
-            w, h = img.size
-            fmt = (img.format or "JPEG").upper()
-            ext = {"JPEG": "jpg", "PNG": "png", "WEBP": "webp"}.get(fmt, "jpg")
-            tipo = {"JPEG": "JPG", "PNG": "PNG", "WEBP": "WEBP"}.get(fmt, "JPG")
-            checksum = hashlib.sha256(content).hexdigest()
-            fname = existing["Nombre_Archivo"] if existing else f"{orden:02d}_{checksum[:12]}.{ext}"
-            if target.store_images_locally:
-                event_dir = IMAGES_DIR / ev.id_unico
-                event_dir.mkdir(parents=True, exist_ok=True)
-                (event_dir / fname).write_bytes(content)
-            else:
-                try:
-                    _upload_image_remote(http, target, ev.id_unico, fname, content)
-                except Exception as upload_exc:
-                    log.warning(f"    Upload HTTP falló ({upload_exc}); blob en BD")
-                ctype = {"JPG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}.get(tipo)
-                try:
-                    _upsert_imagen_blob(conn, ev.id_unico, fname, content, ctype)
-                except Exception as blob_exc:
-                    log.warning(f"    IMAGENES_BLOB falló: {blob_exc}")
-            if existing:
-                continue
-            local_url = f"/static/images/{ev.id_unico}/{fname}"
-            with conn.cursor() as cur:
-                cur.execute("""INSERT INTO BINARIOS_STORAGE
-                    (ID_Unico_Evento, Nombre_Archivo, Tipo_Archivo, URL_Almacenamiento_Nube,
-                     Es_Principal, Orden, Ancho_Px, Alto_Px, Orientacion, URL_Original_Externa, Checksum_SHA256)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                    (ev.id_unico, fname, tipo, local_url, 1 if orden == 0 else 0,
-                     orden, w, h, determinar_orientacion(w, h), url, checksum))
-            COST.add_imagen(pob)
+            _persistir_imagen_evento(conn, http, ev, pob, target,
+                                     _leer_bytes_imagen(http, url),
+                                     orden, url, existing=existing)
         except Exception as e:
             log.error(f"    Imagen fallida {url}: {e}")
+
+
+def _generar_imagen_si_falta(conn, oai, http, ev: MergedEvent,
+                             target: IngestTarget) -> None:
+    """Si el evento se ha quedado sin ninguna imagen, genera una portada con
+    IA y la persiste como principal. Nunca lanza: un fallo deja el evento sin
+    imagen, como antes de existir esta funcionalidad."""
+    if not IMAGE_GEN_ENABLED:
+        return
+    if COST.global_stats["imagenes_ia"] >= IMAGE_GEN_MAX_POR_RUN:
+        log.warning(f"    Imagen IA: tope de {IMAGE_GEN_MAX_POR_RUN} por run "
+                    f"alcanzado; '{ev.titulo[:50]}' se queda sin imagen")
+        return
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM BINARIOS_STORAGE "
+                    "WHERE ID_Unico_Evento=%s LIMIT 1", (ev.id_unico,))
+        if cur.fetchone():
+            return
+    content = generar_imagen_ia_evento(oai, ev)
+    if not content:
+        return
+    try:
+        _persistir_imagen_evento(conn, http, ev, ev.poblacion, target, content,
+                                 orden=0,
+                                 url_origen=f"generated:{IMAGE_GEN_MODEL}",
+                                 fname_prefix="gen")
+        COST.add_imagen_generada(ev.poblacion, _image_gen_precio_usd())
+        log.info(f"    Imagen IA generada para '{ev.titulo[:60]}' "
+                 f"({len(content):,} bytes)")
+    except Exception as exc:
+        log.warning(f"    Imagen IA no persistida para "
+                    f"'{ev.titulo[:50]}': {exc}")
 
 
 def sync_remote_binarios(conn, http: httpx.Client, target: IngestTarget, dry_run: bool) -> None:
@@ -3341,6 +3504,8 @@ def persist_event(conn, oai, http, ev: MergedEvent, cat_map, coords_cache,
 
     # IMÁGENES
     descargar_imagenes(conn, http, ev, ev.poblacion, target)
+    if not dry_run:
+        _generar_imagen_si_falta(conn, oai, http, ev, target)
     with conn.cursor() as cur:
         cur.execute("""SELECT URL_Almacenamiento_Nube FROM BINARIOS_STORAGE
                        WHERE ID_Unico_Evento=%s AND Es_Principal=1 LIMIT 1""", (ev.id_unico,))

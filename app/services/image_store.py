@@ -21,7 +21,9 @@ from typing import Optional, Tuple
 logger = logging.getLogger(__name__)
 
 EVENT_ID_RE = re.compile(r"^[a-f0-9]{64}$")
-FILENAME_RE = re.compile(r"^\d{2}_[a-f0-9]{12}\.(jpg|jpeg|png|webp)$", re.IGNORECASE)
+# Prefijo "\d{2}_" para imágenes descargadas (orden) y "gen_" para las
+# portadas generadas por IA en la ingesta (scripts/ingest_all.py).
+FILENAME_RE = re.compile(r"^(?:\d{2}|gen)_[a-f0-9]{12}\.(jpg|jpeg|png|webp)$", re.IGNORECASE)
 
 _CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS `IMAGENES_BLOB` (
