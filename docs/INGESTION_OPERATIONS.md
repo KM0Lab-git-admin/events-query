@@ -521,26 +521,101 @@ físicamente de la BD con sus binarios (sin archivado).
 Un lock-file (`scripts/.ingest.lock`) impide ejecuciones simultáneas; un lock
 de más de 6 horas se considera huérfano y se ignora.
 
-### Programación del cron (documentado, NO activado)
+### Programación del cron (ACTIVO en Railway)
 
-El comando es idempotente y barato en runs sin cambios. Cuando se decida
-activarlo, opciones:
+El cron diario corre como **servicio cron de Railway** dentro del proyecto de
+events-query. La configuración vive en el repo: `scripts/ingest_cron.json`.
 
-**Windows (Task Scheduler), en la máquina de ejecución:**
+**Fichero de configuración** (`scripts/ingest_cron.json`):
+
+```json
+{
+  "poblaciones": ["Malgrat de Mar"],
+  "modelo": "gpt-4.1-nano",
+  "max_items": null,
+  "refresh": false
+}
+```
+
+- `poblaciones`: una pasada del pipeline por población (una fila en
+  `INGESTA_RUNS` por población → coste diario por población directo).
+- `modelo`, `max_items`, `refresh`: defaults; los flags CLI los sobreescriben.
+- Para añadir o quitar poblaciones: editar el JSON y pushear (el servicio
+  cron lee el fichero en cada ejecución desde la imagen desplegada).
+
+**Servicio cron en Railway** (configuración en el panel, una sola vez):
+
+1. Mismo proyecto Railway que la API de events-query → **New Service** desde
+   el mismo repo (la imagen ya incluye `scripts/` porque el Dockerfile hace
+   `COPY . .`).
+2. **Start Command**: 
+   `python scripts/ingest_all.py --config scripts/ingest_cron.json --target local --images-via-api`
+   - Dentro de Railway, `--target local` usa las `DB_*` del propio servicio
+     (host interno `mysql.railway.internal`), que es lo correcto ahí.
+   - `--images-via-api` (o env `INGEST_IMAGES_VIA_API=1`): las imágenes se
+     suben a la API (disco del servicio + `IMAGENES_BLOB`) en lugar del disco
+     efímero del contenedor cron, para que sobrevivan a los redeploys.
+3. **Cron Schedule**: `0 22 * * *` (Railway usa UTC; equivale a 00:00 en
+   Madrid en verano/CEST; en invierno/CET serían las 23:00 locales).
+4. **Variables**: `DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME` (reference
+   variables del MySQL interno), `OPENAI_API_KEY`, `INGEST_UPLOAD_SECRET`,
+   `EVENTS_API_BASE_URL=https://eventquery.uat.km0lab.com` y
+   `INGEST_RUN_ORIGIN=cron-railway` (marca `INGESTA_RUNS.Target` para
+   distinguir los runs del cron de los manuales en la pestaña Costes).
+
+El lock-file (`scripts/.ingest.lock`) sigue evitando solapes entre el cron y
+ejecuciones manuales; un lock de más de 6 h se considera huérfano.
+
+**Trigger manual sin esperar al cron** (endpoint en la API de UAT):
+
+```bash
+curl -X POST "https://eventquery.uat.km0lab.com/api/v1/ingest/run" \
+  -H "X-Ingest-Secret: <INGEST_UPLOAD_SECRET>"
+# 202 Accepted: lanza el mismo --config en background dentro del servicio API
+# 409 si ya hay un run en marcha
+
+curl "https://eventquery.uat.km0lab.com/api/v1/ingest/status" \
+  -H "X-Ingest-Secret: <INGEST_UPLOAD_SECRET>"
+# estado del lock + último run (coste, eventos, noticias, targets)
+```
+
+**Consumo diario por población**: pestaña **Costes** del front de ops, o API:
+`GET /api/v1/costs/summary?dias=30` (agregado por día y por población),
+`GET /api/v1/costs/runs` (histórico de ejecuciones; la columna Target
+distingue `cron-railway` / `endpoint-railway` / ejecuciones desde PC).
+
+**Alternativas locales (sin Railway), si algún día hacen falta:**
+
 ```powershell
+# Windows (Task Scheduler), en la máquina de ejecución:
 schtasks /create /tn "KM0_Ingesta" /sc daily /st 06:00 `
   /tr "C:\ruta\venv\Scripts\python.exe C:\ruta\events-query\scripts\ingest_all.py --target railway"
 ```
 
-**Linux (crontab):**
 ```cron
+# Linux (crontab):
 0 6 * * * cd /ruta/events-query && ./venv/bin/python scripts/ingest_all.py --target railway >> logs/ingesta.log 2>&1
 ```
 
-**Railway (cron job sobre el servicio):** añadir un servicio cron con schedule
-`0 6 * * *` que ejecute `python scripts/ingest_all.py --target railway`
-(requiere empaquetar scripts/ en el deploy y las env vars RAILWAY_DB_* +
-OPENAI_API_KEY en el servicio).
+### Copia de datos Railway -> local (pruebas con datos reales)
+
+Regla general del proyecto: el flujo de datos de trabajo es **Railway -> local**;
+nunca al revés (excepción documentada: la publicación explícita de UAT con
+`sync_events_db_to_railway.py` / `upload_images_railway.py`).
+
+```bash
+# Últimos N eventos publicados (default 100) de Railway a la BD local,
+# con horarios, categorías, fuentes, binarios e imágenes (IMAGENES_BLOB +
+# static/images). Upsert por ID de evento: reemplaza esos eventos si ya
+# existen en local; no toca el resto.
+python scripts/pull_events_from_railway.py --dry-run            # solo resume
+python scripts/pull_events_from_railway.py --yes                # 100 últimos
+python scripts/pull_events_from_railway.py --limit 50 --poblacion "Malgrat de Mar" --yes
+python scripts/pull_events_from_railway.py --estado TODOS --sin-imagenes --yes
+```
+
+Para la BD del Back Office (premios, puntos, usuarios...) por población, ver
+`km0lab-api/scripts/pull_from_railway.py`.
 
 ### Redes sociales (fase 2)
 
