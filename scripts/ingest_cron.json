@@ -1,0 +1,6 @@
+{
+  "poblaciones": ["Malgrat de Mar"],
+  "modelo": "gpt-4.1-nano",
+  "max_items": null,
+  "refresh": false
+}

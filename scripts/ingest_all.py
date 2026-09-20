@@ -57,6 +57,9 @@ USO
     python ingest_all.py --target both              # extrae 1 vez, persiste en AMBAS BDs
     python ingest_all.py --hard-reset --target both # vacía datos de ingesta y reingesta todo
     python ingest_all.py --poblacion "Malgrat de Mar"   # solo esa población
+    python ingest_all.py --config scripts/ingest_cron.json  # cron: una pasada por población
+    # Cron dentro de Railway (BD interna, imágenes a la API/IMAGENES_BLOB):
+    python ingest_all.py --config scripts/ingest_cron.json --target local --images-via-api
     # Tras parsear cada población se ejecuta automáticamente la deduplicación/
     # agrupación en familias (dedupe_events). Desactivable con --sin-dedupe.
     python ingest_all.py --dry-run                  # no escribe BD/imágenes (SÍ gasta LLM)
@@ -276,10 +279,15 @@ class IngestTarget:
     db_name: str
     api_base_url: Optional[str] = None
     upload_secret: Optional[str] = None
+    force_api_images: bool = False
 
     @property
     def store_images_locally(self) -> bool:
-        return self.name == "local"
+        # force_api_images: el proceso corre DENTRO de Railway (cron) con
+        # --target local (BD interna), pero las imágenes deben ir a la API/
+        # IMAGENES_BLOB porque el disco del contenedor es efímero y distinto
+        # del del servicio API.
+        return self.name == "local" and not self.force_api_images
 
 
 def _normalize_env(val: Optional[str]) -> str:
@@ -291,8 +299,14 @@ def _normalize_env(val: Optional[str]) -> str:
     return v
 
 
-def resolve_ingest_target(target: str, api_base_url: Optional[str] = None) -> IngestTarget:
-    """Resuelve credenciales de BD e imágenes según --target local|railway."""
+def resolve_ingest_target(target: str, api_base_url: Optional[str] = None,
+                          images_via_api: bool = False) -> IngestTarget:
+    """Resuelve credenciales de BD e imágenes según --target local|railway.
+
+    images_via_api (o env INGEST_IMAGES_VIA_API=1): con --target local las
+    imágenes se suben igualmente a la API (disco del servicio + IMAGENES_BLOB)
+    en lugar de al disco local. Pensado para el cron de Railway, donde el
+    proceso usa la BD interna pero su disco es efímero."""
     if target == "local":
         host = _normalize_env(os.getenv("DB_HOST", "localhost"))
         port = int(_normalize_env(os.getenv("DB_PORT", "3306")) or "3306")
@@ -301,6 +315,14 @@ def resolve_ingest_target(target: str, api_base_url: Optional[str] = None) -> In
         name = _normalize_env(os.getenv("DB_NAME"))
         if not all([host, user, password, name]):
             sys.exit("Faltan DB_HOST/DB_USER/DB_PASSWORD/DB_NAME en .env para --target local")
+        via_api = images_via_api or os.getenv("INGEST_IMAGES_VIA_API", "").strip().lower() in (
+            "1", "true", "yes", "on")
+        if via_api:
+            secret = _normalize_env(os.getenv("INGEST_UPLOAD_SECRET")) or password
+            base = (api_base_url or _normalize_env(os.getenv("EVENTS_API_BASE_URL"))
+                    or DEFAULT_EVENTS_API_BASE_URL).rstrip("/")
+            return IngestTarget("local", host, port, user, password, name,
+                                base, secret, force_api_images=True)
         return IngestTarget("local", host, port, user, password, name)
 
     if target == "railway":
@@ -4852,7 +4874,7 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
            target_name: str = "local", api_base_url: Optional[str] = None,
            solo_poblacion: Optional[str] = None, hard_reset: bool = False,
            con_dedupe: bool = True, max_items: Optional[int] = None,
-           url_contains: Optional[str] = None):
+           url_contains: Optional[str] = None, images_via_api: bool = False):
     """Pipeline dirigido por BD: las fuentes/targets salen de BIBLIOTECA_FUENTES
     + SCRAPING_TARGETS (cargadas con scripts/import_fuentes.py). Es el modo
     pensado para el cron diario: detección de cambios por URL, ingesta
@@ -4878,7 +4900,7 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
     # destinos: [{target, conn, cat_map, fuente_cache}] — el primero es el primario
     destinos = []
     for nombre in nombres:
-        tgt = resolve_ingest_target(nombre, api_base_url)
+        tgt = resolve_ingest_target(nombre, api_base_url, images_via_api)
         destinos.append({"target": tgt, "conn": get_connection(tgt),
                          "fuente_cache": {}})
 
@@ -5112,9 +5134,15 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
             if max_items is not None:
                 partes.append(f"max-items={max_items}")
             parametros = " ".join(partes)
+            # INGEST_RUN_ORIGIN permite marcar el origen del run en
+            # INGESTA_RUNS.Target (p.ej. 'cron-railway' en el servicio cron o
+            # 'endpoint-railway' desde POST /ingest/run) para distinguirlos de
+            # las ejecuciones manuales desde PC.
+            origen = os.getenv("INGEST_RUN_ORIGIN", "").strip()
             for d in destinos:
                 try:
-                    COST.persistir_run(d["conn"], inicio_run, d["target"].name,
+                    COST.persistir_run(d["conn"], inicio_run,
+                                       origen or d["target"].name,
                                        parametros, resumen)
                 except Exception as e:
                     log.warning(f"No se pudo guardar el gasto del run en "
@@ -5130,6 +5158,67 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
                 d["conn"].close()
             except Exception:
                 pass
+
+
+def cargar_config_cron(path: str) -> dict:
+    """Lee el JSON de configuración del cron (--config).
+
+    Formato: {"poblaciones": ["Malgrat de Mar", ...], "modelo": "gpt-4.1-nano",
+              "max_items": null, "refresh": false}
+    Solo 'poblaciones' es obligatorio; el resto son defaults que los flags CLI
+    pueden sobreescribir."""
+    p = Path(path)
+    if not p.exists():
+        sys.exit(f"Fichero de configuración no encontrado: {p}")
+    try:
+        cfg = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        sys.exit(f"JSON de configuración inválido ({p}): {e}")
+    if not isinstance(cfg, dict):
+        sys.exit(f"{p}: el JSON raíz debe ser un objeto")
+    poblaciones = cfg.get("poblaciones")
+    if not isinstance(poblaciones, list) or not poblaciones:
+        sys.exit(f"{p}: se requiere 'poblaciones' (lista no vacía de nombres)")
+    return cfg
+
+
+def run_db_desde_config(args) -> None:
+    """Ejecuta run_db para cada población del fichero --config.
+
+    Una ejecución (y una fila en INGESTA_RUNS) por población: el coste diario
+    por población queda directamente persistido. Un fallo en una población no
+    detiene las demás; al final se sale con código 1 si hubo algún fallo."""
+    cfg = cargar_config_cron(args.config)
+    modelo = args.modelo or cfg.get("modelo")
+    if modelo:
+        set_llm_model(modelo)
+        log.info(f"Modelo LLM del run (config): {modelo}")
+    refresh = bool(args.refresh or cfg.get("refresh"))
+    max_items = args.max_items if args.max_items is not None else cfg.get("max_items")
+    poblaciones = [str(p).strip() for p in cfg["poblaciones"] if str(p).strip()]
+    log.info(f"Config cron ({args.config}): {len(poblaciones)} población(es): "
+             f"{', '.join(poblaciones)}")
+    fallos = 0
+    for pob in poblaciones:
+        log.info("=" * 64)
+        log.info(f"CONFIG CRON -> población: {pob}")
+        try:
+            run_db(args.dry_run, args.umbral, refresh,
+                   args.target, args.api_base_url, pob,
+                   args.hard_reset, con_dedupe=not args.sin_dedupe,
+                   max_items=max_items, url_contains=args.url_contains,
+                   images_via_api=args.images_via_api)
+        except SystemExit as e:
+            code = e.code if isinstance(e.code, int) else 1
+            if code == 0:
+                continue
+            fallos += 1
+            log.error(f"Población {pob}: terminó con SystemExit({code})")
+        except Exception:
+            fallos += 1
+            log.exception(f"Población {pob}: error no controlado")
+    if fallos:
+        sys.exit(f"{fallos}/{len(poblaciones)} poblaciones con error")
 
 
 def main():
@@ -5192,6 +5281,18 @@ def main():
                           "con un resumen LLM (máx. 3 frases/párrafos). No "
                           "scrapea; usa el texto persistido como contexto. "
                           "Combinable con --poblacion / --target / --dry-run."))
+    ap.add_argument("--config", default=None, metavar="RUTA.json",
+                    help=("Config del cron (JSON con 'poblaciones', 'modelo', "
+                          "'max_items', 'refresh'; ver scripts/ingest_cron.json). "
+                          "Modo BD: ejecuta el pipeline una vez por población "
+                          "listada (una fila en INGESTA_RUNS por población). "
+                          "Los flags CLI tienen prioridad sobre el fichero."))
+    ap.add_argument("--images-via-api", action="store_true",
+                    help=("Con --target local, sube las imágenes a la API "
+                          "(disco del servicio + IMAGENES_BLOB) en lugar de al "
+                          "disco local. Pensado para el cron de Railway, donde "
+                          "el proceso usa la BD interna pero su disco es "
+                          "efímero. También activable con INGEST_IMAGES_VIA_API=1."))
     args = ap.parse_args()
     if args.modelo:
         set_llm_model(args.modelo)
@@ -5215,6 +5316,10 @@ def main():
         ap.error("--max-items solo está soportado en modo BD (sin --input)")
     if args.input and args.url_contains:
         ap.error("--url-contains solo está soportado en modo BD (sin --input)")
+    if args.config and args.input:
+        ap.error("--config es incompatible con --input (modo BD)")
+    if args.config and args.solo_poblacion:
+        ap.error("--config ya lista las poblaciones; no combines con --poblacion")
 
     if not adquirir_lock():
         sys.exit(1)
@@ -5222,11 +5327,14 @@ def main():
         if args.input:
             run(Path(args.input), args.dry_run, args.umbral, args.refresh,
                 args.target, args.api_base_url)
+        elif args.config:
+            run_db_desde_config(args)
         else:
             run_db(args.dry_run, args.umbral, args.refresh,
                    args.target, args.api_base_url, args.solo_poblacion,
                    args.hard_reset, con_dedupe=not args.sin_dedupe,
-                   max_items=args.max_items, url_contains=args.url_contains)
+                   max_items=args.max_items, url_contains=args.url_contains,
+                   images_via_api=args.images_via_api)
     finally:
         liberar_lock()
 
