@@ -188,7 +188,8 @@ async def list_events(
             MAX(COALESCE(eh.Fecha_Fin, eh.Fecha_Inicio)) AS fecha_fin,
             MIN(eh.Hora_Inicio) AS hora_inicio,
             GROUP_CONCAT(DISTINCT c.Slug ORDER BY c.Slug) AS categorias_slugs,
-            GROUP_CONCAT(DISTINCT c.Nombre_ES ORDER BY c.Slug) AS categorias_es
+            GROUP_CONCAT(DISTINCT c.Nombre_ES ORDER BY c.Slug) AS categorias_es,
+            GROUP_CONCAT(DISTINCT c.Nombre_CAT ORDER BY c.Slug) AS categorias_cat
         FROM EVENTOS_MASTER em
         LEFT JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
         LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
@@ -203,6 +204,10 @@ async def list_events(
             cats = [s for s in slug_blob.split(",") if s] if slug_blob else []
             nombre_blob = row.get("categorias_es") or ""
             cats_nom = [s for s in nombre_blob.split(",") if s] if nombre_blob else []
+            nombre_cat_blob = row.get("categorias_cat") or ""
+            cats_nom_cat = (
+                [s for s in nombre_cat_blob.split(",") if s] if nombre_cat_blob else []
+            )
             return {
                 "id": row["id"],
                 "titulo_es": row["titulo_es"],
@@ -221,6 +226,7 @@ async def list_events(
                 "hora_inicio": str(row["hora_inicio"]) if row.get("hora_inicio") else None,
                 "categorias": cats,
                 "categorias_nombres": cats_nom,
+                "categorias_nombres_cat": cats_nom_cat,
                 "es_familia": False,
                 "actividades": [],
             }
