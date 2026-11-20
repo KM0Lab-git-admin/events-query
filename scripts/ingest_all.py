@@ -3289,13 +3289,16 @@ def descargar_imagenes(conn, http, ev: MergedEvent, pob, target: IngestTarget):
 
 
 def _generar_imagen_si_falta(conn, oai, http, ev: MergedEvent,
-                             target: IngestTarget) -> None:
+                             target: IngestTarget, forzar: bool = False) -> None:
     """Si el evento se ha quedado sin ninguna imagen, genera una portada con
     IA y la persiste como principal. Nunca lanza: un fallo deja el evento sin
-    imagen, como antes de existir esta funcionalidad."""
-    if not IMAGE_GEN_ENABLED:
+    imagen y el cierre de la ingesta lo vuelve a intentar.
+
+    forzar ignora IMAGE_GEN_ENABLED y el tope por ejecución. Lo usa el cierre,
+    que no puede dar la carga por terminada con un evento en blanco."""
+    if not forzar and not IMAGE_GEN_ENABLED:
         return
-    if COST.global_stats["imagenes_ia"] >= IMAGE_GEN_MAX_POR_RUN:
+    if not forzar and COST.global_stats["imagenes_ia"] >= IMAGE_GEN_MAX_POR_RUN:
         log.warning(f"    Imagen IA: tope de {IMAGE_GEN_MAX_POR_RUN} por run "
                     f"alcanzado; '{ev.titulo[:50]}' se queda sin imagen")
         return
@@ -3318,6 +3321,74 @@ def _generar_imagen_si_falta(conn, oai, http, ev: MergedEvent,
     except Exception as exc:
         log.warning(f"    Imagen IA no persistida para "
                     f"'{ev.titulo[:50]}': {exc}")
+
+
+def exigir_portadas_evento(conn, oai, http, target: IngestTarget,
+                           poblaciones: list[str]) -> list[str]:
+    """Genera la portada de cada evento activo sin archivo en esas poblaciones.
+
+    Devuelve los títulos que siguen sin imagen después del intento. Una carga
+    con esa lista no vacía no puede darse por terminada."""
+    if not poblaciones:
+        return []
+    marcas = ", ".join(["%s"] * len(poblaciones))
+    sql = f"""
+        SELECT e.ID_Unico_Evento, e.Poblacion_Nombre, e.Titulo_CAT,
+               e.Desc_Corta_CAT, e.Lugar_Nombre, e.CP_Evento,
+               (SELECT c.Slug FROM EVENTO_CATEGORIAS ec
+                  JOIN CATEGORIAS c ON c.ID_Categoria = ec.ID_Categoria
+                 WHERE ec.ID_Unico_Evento = e.ID_Unico_Evento LIMIT 1) AS slug
+        FROM EVENTOS_MASTER e
+        WHERE e.Estado = 'ACTIVO'
+          AND e.Poblacion_Nombre IN ({marcas})
+          AND NOT EXISTS (SELECT 1 FROM BINARIOS_STORAGE b
+                          WHERE b.ID_Unico_Evento = e.ID_Unico_Evento)
+        ORDER BY e.Poblacion_Nombre, e.Titulo_CAT
+    """
+    with conn.cursor() as cur:
+        cur.execute(sql, poblaciones)
+        rows = cur.fetchall()
+    if not rows:
+        log.info(f"Portadas: ningún evento activo sin imagen en {target.name}")
+        return []
+    log.info(f"Portadas: {len(rows)} eventos sin imagen en {target.name}; "
+             f"se generan ahora")
+    siguen: list[str] = []
+    for row in rows:
+        titulo = row["Titulo_CAT"] or row["ID_Unico_Evento"][:12]
+        ev = MergedEvent(
+            id_unico=row["ID_Unico_Evento"],
+            poblacion=row["Poblacion_Nombre"] or "",
+            cp=row.get("CP_Evento") or "",
+            titulo=titulo,
+            lugar=row.get("Lugar_Nombre") or "",
+            descripcion_larga="",
+            direccion_fisica="",
+            organizador_nombre="",
+            es_gratuito=1,
+            precio_euros=None,
+            link_inscripcion="",
+        )
+        ev.desc_corta = row.get("Desc_Corta_CAT") or ""
+        ev.categoria_principal = row.get("slug") or ""
+        antes = COST.global_stats["imagenes_ia"]
+        _generar_imagen_si_falta(conn, oai, http, ev, target, forzar=True)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT URL_Almacenamiento_Nube FROM BINARIOS_STORAGE
+                           WHERE ID_Unico_Evento=%s AND Es_Principal=1 LIMIT 1""",
+                        (ev.id_unico,))
+            principal = cur.fetchone()
+            if principal:
+                cur.execute("""UPDATE EVENTOS_MASTER SET Imagen_Principal_URL=%s
+                               WHERE ID_Unico_Evento=%s""",
+                            (principal["URL_Almacenamiento_Nube"], ev.id_unico))
+        conn.commit()
+        if COST.global_stats["imagenes_ia"] == antes or not principal:
+            siguen.append(f"{ev.poblacion}: {titulo}")
+            log.error(f"    Sigue sin portada: {ev.poblacion} / {titulo[:60]}")
+        else:
+            log.info(f"    Portada cerrada: {ev.poblacion} / {titulo[:60]}")
+    return siguen
 
 
 def sync_remote_binarios(conn, http: httpx.Client, target: IngestTarget, dry_run: bool) -> None:
@@ -4992,7 +5063,8 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
         if solo_poblacion:
             log.info(f"Limpieza limitada a: {solo_poblacion}")
         if not IMAGE_GEN_ENABLED:
-            log.info("Portadas IA desactivadas (IMAGE_GEN_ENABLED=0)")
+            log.info("Portadas IA aplazadas al cierre (IMAGE_GEN_ENABLED=0); "
+                     "un evento activo no puede quedar sin imagen")
         for d in destinos:
             purge_past_events(d["conn"], http, d["target"], dry_run, solo_poblacion)
             purge_past_horarios(d["conn"], dry_run, solo_poblacion)
@@ -5179,6 +5251,19 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
         log.info("=" * 64)
         log.info(f"RESUMEN DE TARGETS: {resumen['OK']} con cambios · "
                  f"{resumen['SKIP']} sin cambios (skip) · {resumen['ERROR']} con error")
+
+        # Cierre: cada evento activo de las poblaciones de esta carga tiene
+        # portada. Si OpenAI no la entrega, la carga no termina en éxito.
+        if not dry_run:
+            sin_portada: list[str] = []
+            for d in destinos:
+                sin_portada.extend(exigir_portadas_evento(
+                    d["conn"], oai, http, d["target"], list(por_poblacion)))
+            if sin_portada:
+                for titulo in sin_portada:
+                    log.error(f"Evento sin portada: {titulo}")
+                sys.exit(f"{len(sin_portada)} eventos activos siguen sin imagen")
+
         COST.report()
 
         # Persistir el gasto del run en cada destino (lo consume la API/front).
