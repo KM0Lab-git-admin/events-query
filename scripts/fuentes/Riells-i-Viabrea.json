@@ -1,0 +1,22 @@
+{
+  "poblacion": "Riells i Viabrea",
+  "codigos_postales": ["17404"],
+  "fuentes": [
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Notícies Ajuntament de Riells i Viabrea",
+      "url": "https://riellsiviabrea.cat/noticies/",
+      "prioridad": 1,
+      "tipo_contenido": "NOTICIAS",
+      "notas": "HTML público. RSS en /feed/. robots.txt permite el rastreo."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Ajuntament de Riells i Viabrea",
+      "url": "https://riellsiviabrea.cat/events/llista/",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Vista de lista de https://riellsiviabrea.cat/events/. También hay iCal y la API de The Events Calendar; el pipeline lee el HTML."
+    }
+  ]
+}

@@ -1028,11 +1028,12 @@ def load_categorias_map(conn) -> dict:
 # LIMPIEZA INICIAL: borrar eventos pasados + sus imágenes en disco
 # ============================================================================
 
-def purge_past_events(conn, http: httpx.Client, target: IngestTarget, dry_run: bool) -> int:
+def purge_past_events(conn, http: httpx.Client, target: IngestTarget, dry_run: bool,
+                       poblacion: Optional[str] = None) -> int:
     """Borra eventos cuya última fecha (Fecha_Fin o Fecha_Inicio) < hoy.
-    Borra también sus imágenes (disco local o servidor remoto). CASCADE limpia tablas hijas."""
-    with conn.cursor() as cur:
-        cur.execute("""
+    Borra también sus imágenes (disco local o servidor remoto). CASCADE limpia tablas hijas.
+    Con poblacion, solo toca esa ciudad; sin ella, el comportamiento sigue siendo global."""
+    sql = """
             SELECT em.ID_Unico_Evento
             FROM EVENTOS_MASTER em
             JOIN (
@@ -1041,7 +1042,13 @@ def purge_past_events(conn, http: httpx.Client, target: IngestTarget, dry_run: b
                 FROM EVENTO_HORARIOS GROUP BY ID_Unico_Evento
             ) h ON h.ID_Unico_Evento = em.ID_Unico_Evento
             WHERE h.ultima < CURDATE()
-        """)
+        """
+    params: list = []
+    if poblacion:
+        sql += " AND em.Poblacion_Nombre = %s"
+        params.append(poblacion)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
         ids = [r["ID_Unico_Evento"] for r in cur.fetchall()]
 
     if not ids:
@@ -1068,7 +1075,7 @@ def purge_past_events(conn, http: httpx.Client, target: IngestTarget, dry_run: b
     return len(ids)
 
 
-def purge_past_horarios(conn, dry_run: bool) -> int:
+def purge_past_horarios(conn, dry_run: bool, poblacion: Optional[str] = None) -> int:
     """Borra horarios individuales cuya fecha ya pasó, de eventos que por lo
     demás siguen vigentes (conservan al menos un horario futuro).
 
@@ -1077,11 +1084,18 @@ def purge_past_horarios(conn, dry_run: bool) -> int:
     sesiones de un ciclo) se quedarían para siempre en EVENTO_HORARIOS.
     purge_past_events ya borra el evento entero cuando TODOS sus horarios pasaron;
     esto cubre el caso parcial (unos pasados, otros futuros)."""
+    filtro = ""
+    params: list = []
+    join = ""
+    if poblacion:
+        join = " JOIN EVENTOS_MASTER em ON em.ID_Unico_Evento = EVENTO_HORARIOS.ID_Unico_Evento"
+        filtro = " AND em.Poblacion_Nombre = %s"
+        params.append(poblacion)
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT COUNT(*) AS n FROM EVENTO_HORARIOS
-            WHERE COALESCE(Fecha_Fin, Fecha_Inicio) < CURDATE()
-        """)
+        cur.execute(f"""
+            SELECT COUNT(*) AS n FROM EVENTO_HORARIOS{join}
+            WHERE COALESCE(EVENTO_HORARIOS.Fecha_Fin, EVENTO_HORARIOS.Fecha_Inicio) < CURDATE(){filtro}
+        """, params)
         n = cur.fetchone()["n"]
 
     if not n:
@@ -1093,10 +1107,18 @@ def purge_past_horarios(conn, dry_run: bool) -> int:
         return n
 
     with conn.cursor() as cur:
-        cur.execute("""
-            DELETE FROM EVENTO_HORARIOS
-            WHERE COALESCE(Fecha_Fin, Fecha_Inicio) < CURDATE()
-        """)
+        if poblacion:
+            cur.execute("""
+                DELETE h FROM EVENTO_HORARIOS h
+                JOIN EVENTOS_MASTER em ON em.ID_Unico_Evento = h.ID_Unico_Evento
+                WHERE COALESCE(h.Fecha_Fin, h.Fecha_Inicio) < CURDATE()
+                  AND em.Poblacion_Nombre = %s
+            """, (poblacion,))
+        else:
+            cur.execute("""
+                DELETE FROM EVENTO_HORARIOS
+                WHERE COALESCE(Fecha_Fin, Fecha_Inicio) < CURDATE()
+            """)
     conn.commit()
     return n
 
@@ -1188,17 +1210,24 @@ def load_existing_noticias(conn) -> dict:
 
 
 def purge_noticias_caducadas(conn, http: httpx.Client, target: IngestTarget,
-                             dry_run: bool) -> int:
+                             dry_run: bool, poblacion: Optional[str] = None) -> int:
     """Borra FÍSICAMENTE las noticias caducadas (publicadas hace más de
     NEWS_VIGENCIA_DIAS) junto con sus binarios: filas de NOTICIA_BINARIOS
     (CASCADE) e imágenes en disco local o servidor remoto. Las noticias no
     se archivan: pasada la ventana de vigencia, fuera."""
+    sql = """
+            SELECT n.ID_Unico_Noticia
+            FROM NOTICIAS_MASTER n
+            JOIN CIUDADES c ON c.ID_Ciudad = n.ID_Ciudad
+            WHERE COALESCE(n.Fecha_Caducidad,
+                           DATE_ADD(n.Fecha_Publicacion, INTERVAL %s DAY)) < CURDATE()
+        """
+    params: list = [NEWS_VIGENCIA_DIAS]
+    if poblacion:
+        sql += " AND c.Nombre = %s"
+        params.append(poblacion)
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT ID_Unico_Noticia FROM NOTICIAS_MASTER
-            WHERE COALESCE(Fecha_Caducidad,
-                           DATE_ADD(Fecha_Publicacion, INTERVAL %s DAY)) < CURDATE()
-        """, (NEWS_VIGENCIA_DIAS,))
+        cur.execute(sql, params)
         a_borrar = [r["ID_Unico_Noticia"] for r in cur.fetchall()]
 
     if not a_borrar:
@@ -1309,6 +1338,13 @@ def purge_binarios_huerfanos(conn, target: IngestTarget, dry_run: bool) -> int:
 # HTTP + LIMPIEZA HTML
 # ============================================================================
 
+def _respetar_crawl_delay(request: httpx.Request) -> None:
+    """hostalric.cat pide Crawl-delay 10. El portal de turismo no."""
+    host = (request.url.host or "").lower()
+    if host.endswith("hostalric.cat") and "turisme" not in host:
+        time.sleep(10)
+
+
 def make_http_client():
     # Si el dominio custom sirve un cert incorrecto (p.ej. *.up.railway.app),
     # INGEST_SSL_VERIFY=0|false desactiva la verificación solo para esta sesión.
@@ -1321,6 +1357,7 @@ def make_http_client():
         timeout=HTTP_TIMEOUT,
         headers={"User-Agent": HTTP_USER_AGENT},
         verify=verify,
+        event_hooks={"request": [_respetar_crawl_delay]},
     )
 
 
@@ -1339,14 +1376,32 @@ def download_html(url: str, client: httpx.Client) -> str:
     return html or ""
 
 
+def _enlace_de_contenido(href: str) -> bool:
+    """Enlace de ficha, no de menú. Hostalric publica el listado dentro del header."""
+    low = (href or "").lower()
+    return any(k in low for k in ("noticia/", "/event", "esdeveniment/", "agenda/"))
+
+
 def clean_html(html: str) -> str:
     soup = BeautifulSoup(html, "lxml")
-    for tag in soup(["script", "style", "head", "nav", "footer",
-                     "aside", "noscript", "iframe", "form", "header"]):
+    for tag in soup(["script", "style", "head", "noscript", "iframe", "form"]):
         tag.decompose()
     for c in soup.find_all(string=lambda s: isinstance(s, Comment)):
         c.extract()
-    main = soup.find("main") or soup.find("article") or soup.body or soup
+    main = soup.find("main")
+    if main is None:
+        mejor, mejor_n = None, 0
+        for nodo in soup.find_all(["section", "article"]):
+            n = sum(1 for a in nodo.find_all("a", href=True)
+                    if _enlace_de_contenido(a.get("href") or ""))
+            if n > mejor_n:
+                mejor, mejor_n = nodo, n
+        if mejor is not None and mejor_n >= 3:
+            main = mejor
+    if main is None:
+        for tag in soup(["nav", "footer", "aside", "header"]):
+            tag.decompose()
+        main = soup.find("article") or soup.body or soup
     text = str(main)
     text = re.sub(r"\n\s*\n", "\n", text)
     text = re.sub(r"[ \t]+", " ", text)
@@ -4933,11 +4988,15 @@ def run_db(dry_run: bool, umbral: float, refresh: bool = False,
             for d in destinos:
                 hard_reset_datos(d["conn"], http, d["target"], dry_run)
 
-        # 0. Limpieza inicial (por destino)
+        # 0. Limpieza inicial (por destino). Con --poblacion no toca otras ciudades.
+        if solo_poblacion:
+            log.info(f"Limpieza limitada a: {solo_poblacion}")
+        if not IMAGE_GEN_ENABLED:
+            log.info("Portadas IA desactivadas (IMAGE_GEN_ENABLED=0)")
         for d in destinos:
-            purge_past_events(d["conn"], http, d["target"], dry_run)
-            purge_past_horarios(d["conn"], dry_run)
-            purge_noticias_caducadas(d["conn"], http, d["target"], dry_run)
+            purge_past_events(d["conn"], http, d["target"], dry_run, solo_poblacion)
+            purge_past_horarios(d["conn"], dry_run, solo_poblacion)
+            purge_noticias_caducadas(d["conn"], http, d["target"], dry_run, solo_poblacion)
 
         # Estado para la ingesta incremental (tras la limpieza)
         if refresh:

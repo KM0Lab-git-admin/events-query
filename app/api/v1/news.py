@@ -109,9 +109,14 @@ async def list_news(
     try:
         query = _SELECT_NEWS
         params = []
-        if city:
+        nombres = [parte.strip() for parte in (city or "").split(",") if parte.strip()]
+        if len(nombres) == 1:
             query += " AND c.Nombre = %s"
-            params.append(city)
+            params.append(nombres[0])
+        elif nombres:
+            marcas = ", ".join(["%s"] * len(nombres))
+            query += f" AND c.Nombre IN ({marcas})"
+            params.extend(nombres)
         query += " ORDER BY n.Fecha_Publicacion DESC, n.Fecha_Creacion DESC LIMIT %s OFFSET %s"
         params.extend([limit, offset])
 
@@ -121,9 +126,13 @@ async def list_news(
             WHERE n.Estado = 'ACTIVA'
         """
         count_params = []
-        if city:
+        if len(nombres) == 1:
             count_query += " AND c.Nombre = %s"
-            count_params.append(city)
+            count_params.append(nombres[0])
+        elif nombres:
+            marcas = ", ".join(["%s"] * len(nombres))
+            count_query += f" AND c.Nombre IN ({marcas})"
+            count_params.extend(nombres)
 
         async with db_service.get_connection() as conn:
             async with conn.cursor() as cursor:

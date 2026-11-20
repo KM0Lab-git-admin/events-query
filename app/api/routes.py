@@ -21,8 +21,9 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Códigos postales de las únicas poblaciones soportadas (Malgrat de Mar y Blanes)
-POBLACIONES_SOPORTADAS_CP = ("08380", "17300")
+# Códigos postales soportados: Malgrat, Blanes, Riells i Viabrea, Breda, Hostalric.
+POBLACIONES_SOPORTADAS_CP = ("08380", "17300", "17404", "17400", "17450")
+_CP_IN = ", ".join(["%s"] * len(POBLACIONES_SOPORTADAS_CP))
 
 # Router principal
 router = APIRouter()
@@ -169,7 +170,7 @@ async def list_events_simple():
     para poder visualizar qué datos hay disponibles en la BD.
     """
     try:
-        query = """
+        query = f"""
         SELECT 
             em.ID_Unico_Evento,
             em.Titulo_ES,
@@ -186,7 +187,7 @@ async def list_events_simple():
         LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
         LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
         WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
+          AND em.CP_Evento IN ({_CP_IN})
         GROUP BY em.ID_Unico_Evento, em.Titulo_ES, em.Titulo_CAT, em.CP_Evento, em.Poblacion_Nombre, em.Es_Gratuito, em.Precio_Euros
         ORDER BY Fecha_Inicio ASC, em.Titulo_ES ASC
         LIMIT 200
@@ -268,13 +269,18 @@ async def list_events_with_filters(
         # Construir filtros dinámicos (evento único + horarios agregados)
         where_clauses = [
             "em.Estado = 'ACTIVO'",
-            "em.CP_Evento IN (%s, %s)",
+            f"em.CP_Evento IN ({_CP_IN})",
         ]
         where_params: List[Any] = list(POBLACIONES_SOPORTADAS_CP)
 
-        if poblacion:
+        nombres = [parte.strip() for parte in (poblacion or "").split(",") if parte.strip()]
+        if len(nombres) == 1:
             where_clauses.append("em.Poblacion_Nombre = %s")
-            where_params.append(poblacion)
+            where_params.append(nombres[0])
+        elif nombres:
+            marcas = ", ".join(["%s"] * len(nombres))
+            where_clauses.append(f"em.Poblacion_Nombre IN ({marcas})")
+            where_params.extend(nombres)
 
         if categoria:
             where_clauses.append(
@@ -576,14 +582,14 @@ async def list_categorias():
 async def list_poblaciones():
     """Devuelve la lista de poblaciones con eventos. Solo Malgrat de Mar (08380) y Blanes (17300)."""
     try:
-        query = """
+        query = f"""
         SELECT
             em.Poblacion_Nombre as nombre,
             em.CP_Evento as cp,
             COUNT(em.ID_Unico_Evento) as total_eventos
         FROM EVENTOS_MASTER em
         WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
+          AND em.CP_Evento IN ({_CP_IN})
         GROUP BY em.Poblacion_Nombre, em.CP_Evento
         ORDER BY em.Poblacion_Nombre ASC
         """

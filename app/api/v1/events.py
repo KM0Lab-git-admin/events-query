@@ -25,8 +25,16 @@ limiter = Limiter(key_func=get_remote_address)
 # Router
 router = APIRouter()
 
-# Supported postal codes
-POBLACIONES_SOPORTADAS_CP = ("08380", "17300")
+# Supported postal codes: Malgrat, Blanes, Riells i Viabrea, Breda, Hostalric.
+POBLACIONES_SOPORTADAS_CP = ("08380", "17300", "17404", "17400", "17450")
+_CP_IN = ", ".join(["%s"] * len(POBLACIONES_SOPORTADAS_CP))
+
+
+def _nombres_poblacion(valor: Optional[str]) -> List[str]:
+    """Un nombre, o varios separados por coma. Cada ficha conserva el suyo."""
+    if not valor:
+        return []
+    return [parte.strip() for parte in valor.split(",") if parte.strip()]
 
 
 async def _attach_imagenes(conn: Any, eventos: List[Dict[str, Any]]) -> None:
@@ -136,7 +144,7 @@ async def list_events(
 
         offset = (page - 1) * page_size
 
-        where_clauses = ["em.Estado = 'ACTIVO'", "em.CP_Evento IN (%s, %s)"]
+        where_clauses = ["em.Estado = 'ACTIVO'", f"em.CP_Evento IN ({_CP_IN})"]
         params: List[Any] = list(POBLACIONES_SOPORTADAS_CP)
 
         where_clauses.append("eh.Fecha_Inicio >= %s")
@@ -144,9 +152,14 @@ async def list_events(
         where_clauses.append("eh.Fecha_Inicio <= %s")
         params.append(fecha_hasta)
 
-        if poblacion:
+        nombres = _nombres_poblacion(poblacion)
+        if len(nombres) == 1:
             where_clauses.append("em.Poblacion_Nombre = %s")
-            params.append(poblacion)
+            params.append(nombres[0])
+        elif nombres:
+            marcas = ", ".join(["%s"] * len(nombres))
+            where_clauses.append(f"em.Poblacion_Nombre IN ({marcas})")
+            params.extend(nombres)
 
         if categoria:
             where_clauses.append("c.Slug = %s")
@@ -289,7 +302,7 @@ async def get_today_events(request: Request) -> Dict[str, Any]:
     try:
         today = date.today()
 
-        query = """
+        query = f"""
         SELECT
             em.ID_Unico_Evento AS id,
             em.Titulo_ES AS titulo_es,
@@ -309,7 +322,7 @@ async def get_today_events(request: Request) -> Dict[str, Any]:
         LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
         LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
         WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
+          AND em.CP_Evento IN ({_CP_IN})
           AND (%s BETWEEN eh.Fecha_Inicio AND COALESCE(eh.Fecha_Fin, eh.Fecha_Inicio))
         GROUP BY em.ID_Unico_Evento
         ORDER BY MIN(eh.Hora_Inicio) ASC, em.Titulo_ES ASC
@@ -390,7 +403,7 @@ async def get_upcoming_events(
         fecha_desde = date.today() + timedelta(days=1)
         fecha_hasta = date.today() + timedelta(days=days)
 
-        query = """
+        query = f"""
         SELECT
             em.ID_Unico_Evento AS id,
             em.Titulo_ES AS titulo_es,
@@ -412,7 +425,7 @@ async def get_upcoming_events(
         LEFT JOIN EVENTO_CATEGORIAS ec ON em.ID_Unico_Evento = ec.ID_Unico_Evento
         LEFT JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
         WHERE em.Estado = 'ACTIVO'
-          AND em.CP_Evento IN (%s, %s)
+          AND em.CP_Evento IN ({_CP_IN})
           AND eh.Fecha_Inicio >= %s
           AND eh.Fecha_Inicio <= %s
         GROUP BY em.ID_Unico_Evento

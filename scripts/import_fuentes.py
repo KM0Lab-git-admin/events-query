@@ -51,14 +51,21 @@ REGLAS
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Reutiliza la resolución de credenciales/conexión del pipeline (mismo .env,
 # mismos --target local|railway).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from ingest_all import resolve_ingest_target, get_connection  # noqa: E402
+from ingest_all import (  # noqa: E402
+    geocode_poblacion,
+    get_connection,
+    make_openai_client,
+    resolve_ingest_target,
+)
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -129,21 +136,39 @@ def ensure_ciudad_basica(conn, poblacion: str) -> int:
         return cur.lastrowid
 
 
-def ensure_cp_basico(conn, cp: str, id_ciudad: int):
-    """Asegura el CP usando las coordenadas de la ciudad si existen; si la
-    ciudad no tiene coords todavía, lo deja para la primera ingesta."""
+def asegurar_coordenadas(conn, poblacion: str, id_ciudad: int) -> Optional[tuple]:
+    """Devuelve lat/lng de la ciudad. Si faltan, las pide al geocodificador
+    que ya usa la ingesta y las guarda. El CP no puede insertarse sin ellas."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT Latitud, Longitud FROM CIUDADES WHERE ID_Ciudad=%s",
+                    (id_ciudad,))
+        c = cur.fetchone()
+        if c and c["Latitud"] is not None and c["Longitud"] is not None:
+            return c["Latitud"], c["Longitud"]
+    if not os.getenv("OPENAI_API_KEY"):
+        log.warning(f"{poblacion}: sin coordenadas y sin OPENAI_API_KEY; "
+                    f"el CP no se puede insertar")
+        return None
+    coords = geocode_poblacion(make_openai_client(), poblacion)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE CIUDADES SET Latitud=%s, Longitud=%s WHERE ID_Ciudad=%s",
+                    (coords["lat"], coords["lng"], id_ciudad))
+    log.info(f"Coordenadas de {poblacion}: {coords['lat']}, {coords['lng']}")
+    return coords["lat"], coords["lng"]
+
+
+def ensure_cp_basico(conn, cp: str, id_ciudad: int, coords: Optional[tuple]):
+    """Asegura el CP. La tabla exige latitud y longitud, así que sin
+    coordenadas no se inserta."""
     with conn.cursor() as cur:
         cur.execute("SELECT CP FROM CODIGOS_POSTALES WHERE CP=%s", (cp,))
         if cur.fetchone():
             return
-        cur.execute("SELECT Latitud, Longitud FROM CIUDADES WHERE ID_Ciudad=%s", (id_ciudad,))
-        c = cur.fetchone()
-        if not c or c["Latitud"] is None:
-            log.warning(f"CP {cp} no insertado (ciudad sin coordenadas aún); "
-                        f"lo creará la primera ingesta")
+        if not coords:
+            log.warning(f"CP {cp} no insertado (ciudad sin coordenadas)")
             return
         cur.execute("INSERT INTO CODIGOS_POSTALES (CP, ID_Ciudad, Latitud, Longitud) "
-                    "VALUES (%s,%s,%s,%s)", (cp, id_ciudad, c["Latitud"], c["Longitud"]))
+                    "VALUES (%s,%s,%s,%s)", (cp, id_ciudad, coords[0], coords[1]))
 
 
 def upsert_fuente(conn, id_ciudad: int, f: dict) -> tuple:
@@ -227,8 +252,9 @@ def importar(input_path: Path, target_name: str, dry_run: bool):
     creadas = actualizadas = targets_nuevos = sin_target = 0
     try:
         id_ciudad = ensure_ciudad_basica(conn, poblacion)
+        coords = asegurar_coordenadas(conn, poblacion, id_ciudad)
         for cp in seed.get("codigos_postales", []):
-            ensure_cp_basico(conn, cp, id_ciudad)
+            ensure_cp_basico(conn, cp, id_ciudad, coords)
 
         for f in fuentes:
             activa = f.get("activa", True)
