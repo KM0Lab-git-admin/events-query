@@ -1,0 +1,18 @@
+{
+  "_doc": "Catálogo de EJEMPLO de playas caninas de la costa del Maresme para probar el enlace contenido → ficha de playa. Fuente: Capgròs (23-05-2025) y guías 2026. Temporadas y horarios cambian cada año: verificar con cada ayuntamiento antes de publicar. urlFicha usa la plantilla urlFichaPlaya de la cabecera del XML.",
+  "playas": [
+    {"id": "pl-malgrat-conca", "nombre": "Platja de la Conca", "alias": ["playa de la conca", "platja de la conca", "la conca"], "municipio": "Malgrat de Mar", "provincia": "08", "nota": "Tramo habilitado para perros; vallado y duchas según guías 2026"},
+    {"id": "pl-pineda-poblenou", "nombre": "Platja del Poblenou", "alias": ["playa del poblenou", "platja del poblenou", "poblenou pineda"], "municipio": "Pineda de Mar", "provincia": "08", "nota": "Duchas para perros; abierta todo el año según guías 2026"},
+    {"id": "pl-calella-gran", "nombre": "Platja Gran", "alias": ["playa gran", "platja gran", "platja gran de calella"], "municipio": "Calella", "provincia": "08", "nota": "Tramo vallado para perros"},
+    {"id": "pl-santpol-canvillar", "nombre": "Platja de Can Villar", "alias": ["playa de can villar", "platja de can villar", "can villar"], "municipio": "Sant Pol de Mar", "provincia": "08", "nota": "Acceso con perros solo de 20:00 a 08:00 según guías"},
+    {"id": "pl-santpol-murtra", "nombre": "Platja de la Murtra", "alias": ["playa de la murtra", "platja de la murtra", "la murtra"], "municipio": "Sant Pol de Mar", "provincia": "08", "nota": ""},
+    {"id": "pl-santpol-roquesblanques", "nombre": "Platja de les Roques Blanques", "alias": ["roques blanques", "playa de las rocas blancas", "platja de les roques blanques"], "municipio": "Sant Pol de Mar", "provincia": "08", "nota": ""},
+    {"id": "pl-canet-cavaio", "nombre": "Platja del Cavaió", "alias": ["playa del cavaió", "platja del cavaio", "cavaió", "cavaio"], "municipio": "Canet de Mar", "provincia": "08", "nota": ""},
+    {"id": "pl-arenys-picordia", "nombre": "Platja de la Picòrdia", "alias": ["playa de la picòrdia", "platja de la picordia", "picòrdia", "picordia"], "municipio": "Arenys de Mar", "provincia": "08", "nota": ""},
+    {"id": "pl-santvicenc", "nombre": "Platja de Sant Vicenç", "alias": ["playa de sant vicenç", "platja de sant vicenç de montalt", "platja de sant vicenc"], "municipio": "Sant Vicenç de Montalt", "provincia": "08", "nota": ""},
+    {"id": "pl-mataro-ponent", "nombre": "Platja de Ponent (platja dels gossos)", "alias": ["playa de ponent", "platja de ponent", "platja dels gossos", "playa de los perros de mataró", "ponent mataró"], "municipio": "Mataró", "provincia": "08", "nota": "Habilitada en 2021"},
+    {"id": "pl-vilassar-ponent", "nombre": "Platja de Ponent (tramo Vilassar)", "alias": ["playa de ponent vilassar", "platja de ponent vilassar"], "municipio": "Vilassar de Mar", "provincia": "08", "nota": "Tramo compartido con Premià de Mar"},
+    {"id": "pl-premia-llevant", "nombre": "Platja de Llevant", "alias": ["playa de llevant", "platja de llevant", "zona de llevant premià"], "municipio": "Premià de Mar", "provincia": "08", "nota": "Tramo compartido con Vilassar de Mar; zona dunar protegida"},
+    {"id": "pl-masnou", "nombre": "Tramo canino El Masnou", "alias": ["playa para perros el masnou", "platja gossos masnou", "masnou-montgat"], "municipio": "El Masnou", "provincia": "08", "nota": "Nombre del tramo no confirmado en las guías 2026"}
+  ]
+}

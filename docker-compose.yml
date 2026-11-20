@@ -13,6 +13,10 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
       - ./scripts/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      # El Viajero Animalista: segunda BD en el mismo MySQL (solo en volumen nuevo;
+      # en uno existente aplicar SQL/animalista/README.md a mano)
+      - ./SQL/animalista/schema.sql:/docker-entrypoint-initdb.d/zz_animalista_schema.sql
+      - ./SQL/animalista/grant_local.sql:/docker-entrypoint-initdb.d/zz_animalista_grant.sql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
       interval: 10s

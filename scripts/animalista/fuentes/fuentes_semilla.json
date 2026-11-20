@@ -1,0 +1,128 @@
+{
+  "_doc": "Semilla de fuentes de El Viajero Animalista. Se carga con scripts/animalista/import_fuentes.py (fase 2). Upsert por URL_Base. 'activa': false registra la fuente sin target. Verificadas en vivo el 12-10-2026 salvo las marcadas como candidatas.",
+  "fuentes": [
+    {
+      "nombre": "Google News · bienestar animal perros",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "NOTICIAS",
+      "url": "https://news.google.com/rss/search?q=bienestar+animal+perros+when:10d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true, "ambito_default": "NACIONAL",
+      "notas": "Verificada 12-10-2026. Los enlaces necesitan decodificación (ver crawl_mockup.py)."
+    },
+    {
+      "nombre": "Google News · bienestar animal gatos",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "NOTICIAS",
+      "url": "https://news.google.com/rss/search?q=bienestar+animal+gatos+OR+%22colonia+felina%22+when:10d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true, "ambito_default": "NACIONAL"
+    },
+    {
+      "nombre": "Google News · ley bienestar animal",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "NOTICIAS",
+      "url": "https://news.google.com/rss/search?q=%22ley+de+bienestar+animal%22+when:10d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true, "ambito_default": "NACIONAL"
+    },
+    {
+      "nombre": "Google News · adopción protectora",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "MIXTO",
+      "url": "https://news.google.com/rss/search?q=adopci%C3%B3n+perros+OR+gatos+protectora+when:10d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true,
+      "notas": "Verificada 12-10-2026. Devuelve bastante ruido de Latinoamérica: el clasificador descarta por geografía."
+    },
+    {
+      "nombre": "Google News · playa para perros / parque canino",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "NOTICIAS",
+      "url": "https://news.google.com/rss/search?q=%22playa+para+perros%22+OR+%22parque+canino%22+OR+%22zona+canina%22+when:14d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true,
+      "notas": "Verificada 12-10-2026. Muy productiva para iniciativas municipales."
+    },
+    {
+      "nombre": "Google News · pet friendly / viajar con perro",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "MIXTO",
+      "url": "https://news.google.com/rss/search?q=%22pet+friendly%22+OR+%22admiten+mascotas%22+OR+%22viajar+con+perro%22+when:14d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true,
+      "notas": "Verificada 12-10-2026. Mezcla turismo, promociones y notas de prensa de marcas."
+    },
+    {
+      "nombre": "Google News · feria / evento mascotas",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "EVENTOS",
+      "url": "https://news.google.com/rss/search?q=feria+OR+evento+OR+jornada+mascotas+OR+perros+OR+gatos+when:10d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true,
+      "notas": "Verificada 12-10-2026."
+    },
+    {
+      "nombre": "Google News · ayuntamiento ordenanza / maltrato",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "MIXTO",
+      "url": "https://news.google.com/rss/search?q=ayuntamiento+animales+ordenanza+OR+sanci%C3%B3n+OR+maltrato+when:10d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 1, "activa": true,
+      "notas": "Verificada 12-10-2026. La más productiva en iniciativas y sucesos."
+    },
+    {
+      "nombre": "Google News · hotel admite mascotas",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "MIXTO",
+      "url": "https://news.google.com/rss/search?q=hotel+OR+alojamiento+%22admite+mascotas%22+OR+%22admiten+perros%22+when:14d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 2, "activa": true,
+      "notas": "Pensada para alimentar ALOJAMIENTO en fase 2; en MVP aporta noticias de turismo."
+    },
+    {
+      "nombre": "Google News · exposición canina / agility / canicross",
+      "tipo": "FEED_CONSULTA", "tipo_contenido": "EVENTOS",
+      "url": "https://news.google.com/rss/search?q=%22exposici%C3%B3n+canina%22+OR+agility+OR+canicross+when:14d&hl=es&gl=ES&ceid=ES:es",
+      "prioridad": 2, "activa": true
+    },
+    {
+      "nombre": "OkDiario · Mascotas (RSS)",
+      "tipo": "MEDIO", "tipo_contenido": "NOTICIAS",
+      "url": "https://okdiario.com/mascotas/feed",
+      "prioridad": 2, "activa": true, "ambito_default": "NACIONAL",
+      "notas": "Verificada 12-10-2026. Enlaces directos; mucho consejo de bienestar y comportamiento."
+    },
+    {
+      "nombre": "FAPAM · Federación protectoras Madrid (RSS)",
+      "tipo": "ASOCIACION", "tipo_contenido": "MIXTO",
+      "url": "https://fapam.org/feed/",
+      "prioridad": 2, "activa": true, "ambito_default": "CCAA", "geo_default": "13", "imagenes_permitidas": true,
+      "notas": "Verificada 12-10-2026. Fichas de adopción (tipo RECURSO) y convocatorias."
+    },
+    {
+      "nombre": "Animal's Health (RSS)",
+      "tipo": "MEDIO", "tipo_contenido": "NOTICIAS",
+      "url": "https://www.animalshealth.es/rss",
+      "prioridad": 3, "activa": true, "ambito_default": "NACIONAL",
+      "notas": "Feed válido pero los enlaces del feed devolvieron 404 el 12-10-2026. Revisar formato de URL antes de confiar en ella. Mayoría de contenido veterinario profesional."
+    },
+    {
+      "nombre": "Ajuntament de Barcelona · Benestar Animal (listado)",
+      "tipo": "OFICIAL", "tipo_contenido": "NOTICIAS",
+      "url": "https://ajuntament.barcelona.cat/benestaranimal/es/noticias",
+      "prioridad": 2, "activa": true, "ambito_default": "MUNICIPIO", "geo_default": "08019", "imagenes_permitidas": true,
+      "notas": "Verificada 12-10-2026. Publica poco (última noticia junio 2026)."
+    },
+    {
+      "nombre": "Consumer · Mascotas (listado)",
+      "tipo": "PORTAL", "tipo_contenido": "MIXTO",
+      "url": "https://www.consumer.es/mascotas/",
+      "prioridad": 3, "activa": false,
+      "notas": "Contenido evergreen sin fecha: candidato a RECURSO en fase 2."
+    },
+    {
+      "nombre": "Ayuntamiento de Madrid · noticias (candidata)",
+      "tipo": "OFICIAL", "tipo_contenido": "NOTICIAS",
+      "url": "https://www.madrid.es/portales/munimadrid/es/Inicio/Actualidad/Noticias/",
+      "prioridad": 2, "activa": false, "ambito_default": "MUNICIPIO", "geo_default": "28079",
+      "notas": "Devolvió HTTP 403 a la descarga automática el 12-10-2026. Probar con otro User-Agent o buscar RSS."
+    },
+    {
+      "nombre": "SrPerro · blog (candidata)",
+      "tipo": "PORTAL", "tipo_contenido": "MIXTO",
+      "url": "https://www.srperro.com/blog_perro/",
+      "prioridad": 2, "activa": false,
+      "notas": "Artículos legibles; su /feed/ devuelve 410. Probar listado HTML."
+    },
+    {
+      "nombre": "Eventbrite · búsqueda mascotas (candidata)",
+      "tipo": "AGREGADOR", "tipo_contenido": "EVENTOS",
+      "url": "https://www.eventbrite.es/d/spain/mascotas/",
+      "prioridad": 3, "activa": false,
+      "notas": "Listado con mucho ruido; comprobar JSON-LD en el HTML crudo."
+    }
+  ]
+}
