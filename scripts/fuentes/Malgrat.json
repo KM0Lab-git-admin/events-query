@@ -1,0 +1,321 @@
+{
+  "poblacion": "Malgrat de Mar",
+  "codigos_postales": ["08380"],
+  "fuentes": [
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Ajuntament de Malgrat",
+      "url": "https://www.ajmalgrat.cat/comunicacio/agenda",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Històric agenda Ajuntament de Malgrat",
+      "url": "https://www.ajmalgrat.cat/comunicacio/historic-agenda",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Listado paginado (?pag=). El pipeline fuerza archive_order=DESC y el año corriente."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Notícies Ajuntament de Malgrat",
+      "url": "https://www.ajmalgrat.cat/comunicacio/noticies",
+      "prioridad": 1,
+      "tipo_contenido": "NOTICIAS"
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Ona Malgrat (ràdio municipal)",
+      "url": "https://www.onamalgrat.cat/news",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO"
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Biblioteca La Cooperativa (calendari Diba)",
+      "url": "https://bibliotecavirtual.diba.cat/ca/malgrat-de-mar-biblioteca-la-cooperativa/-/cercador/cercaCalendari",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "El pipeline añade /mes/año y recorre meses siguientes."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Centre Cívic 2026 (PDF)",
+      "url": "https://www.ajmalgrat.cat/media/repository/noticies/2026/Documents/AgendaCentreCivic2026.pdf",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "PDF de talleres y actividades recurrentes sep–dic (pypdf → texto → LLM)."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — agenda",
+      "url": "https://www.turismemaresme.cat/ca/descobreix/agenda/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Listado comarcal paginado; el pipeline filtra ítems que mencionan Malgrat."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Malgrat Turisme — agenda d'activitats",
+      "url": "https://turismemalgrat.com/categoria-gaudeix/agenda-activitats/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS"
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Malgrat de Mar",
+      "url": "https://www.esdeveniments.cat/malgrat-de-mar",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Reactivada 2026-09-18: el listado vuelve a publicar actos (verificado en vivo)."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Festival Libèl·lula (detalle)",
+      "url": "https://www.esdeveniments.cat/e/festival-libellula-tallers-circ-12-de-juny-del-2026-fcfafc8a-2a57-4097-bc10-42de90213e10",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Firavi (detalle)",
+      "url": "https://www.esdeveniments.cat/e/firavi-12-de-juny-del-2026-2f0e757f-77b3-4003-91f6-284ebe4efe73",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "esdeveniments.cat — Fira Animalista (detalle)",
+      "url": "https://www.esdeveniments.cat/e/fira-animalista-13-de-juny-del-2026-d28dc6c5-40b0-44bf-bb85-1eacd33f6f0e",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — Festival Libèl·lula (detalle)",
+      "url": "https://www.turismemaresme.cat/es/descubre/agenda/2204/festival-libel-lula",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Ficha suelta caducada; sustituida por el listado de agenda."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — Firavi (detalle)",
+      "url": "https://www.turismemaresme.cat/ca/descobreix/agenda/1679/firavi-a-malgrat-de-mar",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Ficha suelta caducada; sustituida por el listado de agenda."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Fires Catalanes — Fira Animalista (detalle)",
+      "url": "https://firescatalanes.cat/fires/fira-animalista-malgrat-de-mar/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Fires Catalanes — Malgrat de Mar",
+      "url": "https://firescatalanes.cat/ubicacio/malgrat-de-mar/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Listado vacío en 2026-08."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "avui.info — Libèl·lula (detalle)",
+      "url": "https://www.avui.info/eventos/libel-lula",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "avui.info — Fira Animalista (detalle)",
+      "url": "https://www.avui.info/eventos/fira-animalista-malgrat",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "avui.info — Vespres Can Pins (detalle)",
+      "url": "https://www.avui.info/eventos/vespres-can-pins",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "tipo_target": "WEB_DETALLE",
+      "activa": false,
+      "notas": "Acto de junio 2026, caducado."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Entrapolis — Associació Aixafaroques (CA)",
+      "url": "https://www.entrapolis.com/entrades/associacio-aixafaroques",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Listado vacío en 2026-08."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Entrapolis — Associació Aixafaroques (ES)",
+      "url": "https://www.entrapolis.com/entradas/associacio-aixafaroques",
+      "prioridad": 3,
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Listado vacío en 2026-08."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Festa Major Sant Roc 2026 (PDF)",
+      "url": "https://www.ajmalgrat.cat/media/repository/noticies/2026/Documents/WEB_MALGRAT_DE_MAR-_FESTA_MAJOR_SANT_ROC_2026_-_16X16_V4.pdf",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Programa completo de la festa major (pypdf -> texto -> LLM, mismo patron que el PDF del Centre Civic)."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Marina 360 — Malgrat de Mar",
+      "url": "https://marina360.cat/noticies-malgrat-de-mar/",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO",
+      "notas": "Portal local de Radio Marina: agenda y noticias de actos de Malgrat."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Grup de Teatre Germanor",
+      "url": "https://grupgermanor.com/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Temporada de teatre (Concurs Vicenc Bayarri oct-marc, estrenos, Pastorets)."
+    },
+    {
+      "tipo": "AGREGADOR",
+      "nombre": "Turisme Maresme — agenda cultural",
+      "url": "https://www.turismemaresme.cat/ca/descobreix/agenda/cat/9/cultural",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Vista por categoria cultural del agregador comarcal; el pipeline filtra items que mencionan Malgrat."
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "TELEGRAM",
+      "handle": "AjuntamentdeMalgrat",
+      "nombre": "Telegram Ajuntament de Malgrat",
+      "url": "https://t.me/s/AjuntamentdeMalgrat",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO",
+      "activa": true
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
+      "handle": "laguardadelllibre",
+      "nombre": "Instagram La Guarda del Llibre",
+      "url": "https://www.instagram.com/laguardadelllibre/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": true,
+      "notas": "Sin Apify: intenta perfil público; si Meta bloquea (429), usa scripts/fuentes/instagram_media/laguardadelllibre/ + cartel-OCR"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
+      "handle": "ajmalgrat",
+      "nombre": "Instagram Ajuntament de Malgrat",
+      "url": "https://www.instagram.com/ajmalgrat/",
+      "prioridad": 1,
+      "tipo_contenido": "MIXTO",
+      "activa": true,
+      "notas": "Sin Apify: live best-effort + scripts/fuentes/instagram_media/ajmalgrat/"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "FACEBOOK",
+      "handle": "ajmalgrat",
+      "nombre": "Facebook Ajuntament de Malgrat",
+      "url": "https://www.facebook.com/ajmalgrat/",
+      "prioridad": 1,
+      "tipo_contenido": "MIXTO",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "X_TWITTER",
+      "handle": "ajmalgrat",
+      "nombre": "X/Twitter Ajuntament de Malgrat",
+      "url": "https://twitter.com/ajmalgrat",
+      "prioridad": 2,
+      "tipo_contenido": "NOTICIAS",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "YOUTUBE",
+      "handle": "ajmalgrat",
+      "nombre": "YouTube Ajuntament de Malgrat",
+      "url": "https://www.youtube.com/user/ajmalgrat",
+      "prioridad": 2,
+      "tipo_contenido": "MIXTO",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
+      "handle": "visitmalgratdemar",
+      "nombre": "Instagram Visit Malgrat de Mar",
+      "url": "https://www.instagram.com/visitmalgratdemar/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": true,
+      "notas": "Sin Apify: live best-effort + scripts/fuentes/instagram_media/visitmalgratdemar/"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "INSTAGRAM",
+      "handle": "bibliomalgrat",
+      "nombre": "Instagram Biblioteca La Cooperativa",
+      "url": "https://www.instagram.com/bibliomalgrat/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": true,
+      "notas": "Sin Apify: live best-effort + scripts/fuentes/instagram_media/bibliomalgrat/"
+    },
+    {
+      "tipo": "RED_SOCIAL_PERFIL",
+      "plataforma": "FACEBOOK",
+      "handle": "malgratturisme",
+      "nombre": "Facebook Malgrat Turisme",
+      "url": "https://www.facebook.com/malgratturisme/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "activa": false,
+      "notas": "Fase 2: conector Apify"
+    }
+  ]
+}

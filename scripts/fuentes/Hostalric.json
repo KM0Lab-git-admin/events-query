@@ -1,0 +1,30 @@
+{
+  "poblacion": "Hostalric",
+  "codigos_postales": ["17450"],
+  "fuentes": [
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Notícies Ajuntament d'Hostalric",
+      "url": "https://www.hostalric.cat/noticies.php",
+      "prioridad": 1,
+      "tipo_contenido": "NOTICIAS",
+      "notas": "HTML público. Sin RSS. robots.txt permite esta ruta y pide Crawl-delay 10. El CP 17450 sale del avís legal."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Ajuntament d'Hostalric",
+      "url": "https://www.hostalric.cat/agenda.php",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Agenda municipal. robots.txt permite esta ruta."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda Turisme Hostalric",
+      "url": "https://www.turismehostalric.cat/agenda/",
+      "prioridad": 2,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Portal de turismo municipal. robots.txt permite /agenda/ a los bots generales."
+    }
+  ]
+}

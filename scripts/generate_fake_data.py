@@ -1,6 +1,12 @@
 """
-Script para generar datos fake para la base de datos Events Query API.
-Genera 5 poblaciones con 25 eventos cada una (total: 125 eventos).
+Único punto de entrada para datos fake (ID_Usuario_Carga = fake_data_generator_v2).
+
+La API NO genera datos fake al arrancar. Ejecutar explícitamente:
+
+    python scripts/generate_fake_data.py
+
+Genera eventos para Malgrat de Mar y Blanes (sin duplicados de título)
+e incluye embeddings con OpenAI. Opción --no-clear para no vaciar la BD antes.
 """
 
 import sys
@@ -9,281 +15,696 @@ import asyncio
 import json
 import hashlib
 from datetime import datetime, timedelta, date
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Tuple
 import random
 
 # Añadir el directorio raíz al path para importar módulos
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from openai import AsyncOpenAI
+
 from app.services.database import DatabaseService
 from app.config import settings
 
-# Configuración
-CIUDADES = [
-    {"id": 1, "nombre": "Malgrat de Mar", "provincia": "Barcelona", "comunidad": "Cataluña"},
-    {"id": 2, "nombre": "Calella", "provincia": "Barcelona", "comunidad": "Cataluña"},
-    {"id": 3, "nombre": "Canet de Mar", "provincia": "Barcelona", "comunidad": "Cataluña"},
-    {"id": 4, "nombre": "Pineda de Mar", "provincia": "Barcelona", "comunidad": "Cataluña"},
-    {"id": 5, "nombre": "Blanes", "provincia": "Girona", "comunidad": "Cataluña"}
-]
+# Importar datos de lugares reales
+from scripts.data.lugares_reales import (
+    POBLACIONES,
+    ASOCIACIONES,
+    EVENTOS_PLANTILLAS
+)
 
-CODIGOS_POSTALES = [
-    {"cp": "08380", "ciudad_id": 1, "lat": 41.6462, "lng": 2.7411},
-    {"cp": "08370", "ciudad_id": 2, "lat": 41.6151, "lng": 2.6600},
-    {"cp": "08360", "ciudad_id": 3, "lat": 41.5905, "lng": 2.5805},
-    {"cp": "08397", "ciudad_id": 4, "lat": 41.6275, "lng": 2.6931},
-    {"cp": "17300", "ciudad_id": 5, "lat": 41.6751, "lng": 2.7928}
-]
+# =============================================================================
+# CONFIGURACIÓN
+# =============================================================================
 
-CATEGORIAS = [
-    {"id": 1, "nombre_es": "Cultura", "nombre_cat": "Cultura", "slug": "cultura", "orden": 1},
-    {"id": 2, "nombre_es": "Deportes", "nombre_cat": "Esports", "slug": "deportes", "orden": 2},
-    {"id": 3, "nombre_es": "Ocio", "nombre_cat": "Oci", "slug": "ocio", "orden": 3},
-    {"id": 4, "nombre_es": "Infantil", "nombre_cat": "Infantil", "slug": "infantil", "orden": 4},
-    {"id": 5, "nombre_es": "Formación", "nombre_cat": "Formació", "slug": "formacion", "orden": 5},
-    {"id": 6, "nombre_es": "Gastronomía", "nombre_cat": "Gastronomia", "slug": "gastronomia", "orden": 6},
-    {"id": 7, "nombre_es": "Música", "nombre_cat": "Música", "slug": "musica", "orden": 7},
-    {"id": 8, "nombre_es": "Naturaleza", "nombre_cat": "Naturalesa", "slug": "naturaleza", "orden": 8}
-]
+EVENTOS_POR_POBLACION = 100
+PORCENTAJE_RECURRENTES_BASE = 0.20  # 20% de eventos no-recurrentes por defecto
+DIAS_RANGO_EVENTOS = 60  # Próximos 60 días (2 meses)
 
-# Plantillas de eventos por categoría
-EVENTOS_TEMPLATES = {
-    "cultura": [
-        {"titulo_es": "Exposición de arte contemporáneo", "titulo_cat": "Exposició d'art contemporani",
-         "tags_es": ["#arte", "#exposicion", "#cultura"], "tags_cat": ["#art", "#exposicio", "#cultura"]},
-        {"titulo_es": "Cineclub: Clásicos del cine", "titulo_cat": "Cineclub: Clàssics del cinema",
-         "tags_es": ["#cine", "#clasicos", "#cultura"], "tags_cat": ["#cinema", "#classics", "#cultura"]},
-        {"titulo_es": "Teatro: Comedia en familia", "titulo_cat": "Teatre: Comèdia en família",
-         "tags_es": ["#teatro", "#comedia", "#familia"], "tags_cat": ["#teatre", "#comedia", "#familia"]},
-        {"titulo_es": "Conferencia sobre historia local", "titulo_cat": "Conferència sobre història local",
-         "tags_es": ["#historia", "#conferencia", "#educativo"], "tags_cat": ["#historia", "#conferencia", "#educatiu"]},
-    ],
-    "deportes": [
-        {"titulo_es": "Torneo de fútbol 7", "titulo_cat": "Torneig de futbol 7",
-         "tags_es": ["#futbol", "#torneo", "#deporte"], "tags_cat": ["#futbol", "#torneig", "#esport"]},
-        {"titulo_es": "Carrera popular 10K", "titulo_cat": "Cursa popular 10K",
-         "tags_es": ["#running", "#carrera", "#deporte"], "tags_cat": ["#running", "#cursa", "#esport"]},
-        {"titulo_es": "Clase de yoga al aire libre", "titulo_cat": "Classe de ioga a l'aire lliure",
-         "tags_es": ["#yoga", "#aire_libre", "#bienestar"], "tags_cat": ["#ioga", "#aire_lliure", "#benestar"]},
-    ],
-    "ocio": [
-        {"titulo_es": "Mercadillo artesanal", "titulo_cat": "Mercat artesanal",
-         "tags_es": ["#mercado", "#artesania", "#compras"], "tags_cat": ["#mercat", "#artesania", "#compres"]},
-        {"titulo_es": "Fiesta de la cerveza", "titulo_cat": "Festa de la cervesa",
-         "tags_es": ["#cerveza", "#fiesta", "#gastronomia"], "tags_cat": ["#cervesa", "#festa", "#gastronomia"]},
-        {"titulo_es": "Concierto de música en vivo", "titulo_cat": "Concert de música en viu",
-         "tags_es": ["#musica", "#concierto", "#directo"], "tags_cat": ["#musica", "#concert", "#directe"]},
-    ],
-    "infantil": [
-        {"titulo_es": "Taller de manualidades para niños", "titulo_cat": "Taller de manualitats per a nens",
-         "tags_es": ["#infantil", "#taller", "#manualidades"], "tags_cat": ["#infantil", "#taller", "#manualitats"]},
-        {"titulo_es": "Cuentacuentos en la biblioteca", "titulo_cat": "Contacontes a la biblioteca",
-         "tags_es": ["#infantil", "#cuentos", "#lectura"], "tags_cat": ["#infantil", "#contes", "#lectura"]},
-        {"titulo_es": "Parque de atracciones móvil", "titulo_cat": "Parc d'atraccions mòbil",
-         "tags_es": ["#infantil", "#atracciones", "#diversión"], "tags_cat": ["#infantil", "#atraccions", "#diversio"]},
-    ],
-    "formacion": [
-        {"titulo_es": "Curso de fotografía digital", "titulo_cat": "Curs de fotografia digital",
-         "tags_es": ["#fotografia", "#curso", "#aprendizaje"], "tags_cat": ["#fotografia", "#curs", "#aprenentatge"]},
-        {"titulo_es": "Taller de cocina mediterránea", "titulo_cat": "Taller de cuina mediterrània",
-         "tags_es": ["#cocina", "#taller", "#gastronomia"], "tags_cat": ["#cuina", "#taller", "#gastronomia"]},
-    ],
-    "gastronomia": [
-        {"titulo_es": "Feria gastronómica local", "titulo_cat": "Fira gastronòmica local",
-         "tags_es": ["#gastronomia", "#feria", "#comida"], "tags_cat": ["#gastronomia", "#fira", "#menjar"]},
-        {"titulo_es": "Cata de vinos y quesos", "titulo_cat": "Tast de vins i formatges",
-         "tags_es": ["#vino", "#queso", "#degustacion"], "tags_cat": ["#vi", "#formatge", "#degustacio"]},
-    ],
-    "musica": [
-        {"titulo_es": "Festival de jazz", "titulo_cat": "Festival de jazz",
-         "tags_es": ["#jazz", "#musica", "#festival"], "tags_cat": ["#jazz", "#musica", "#festival"]},
-        {"titulo_es": "Concierto de música clásica", "titulo_cat": "Concert de música clàssica",
-         "tags_es": ["#clasica", "#musica", "#concierto"], "tags_cat": ["#classica", "#musica", "#concert"]},
-    ],
-    "naturaleza": [
-        {"titulo_es": "Excursión guiada por la montaña", "titulo_cat": "Excursió guiada per la muntanya",
-         "tags_es": ["#naturaleza", "#senderismo", "#aire_libre"], "tags_cat": ["#naturalesa", "#senderisme", "#aire_lliure"]},
-        {"titulo_es": "Limpieza de playa", "titulo_cat": "Neteja de platja",
-         "tags_es": ["#playa", "#medio_ambiente", "#voluntariado"], "tags_cat": ["#platja", "#medi_ambient", "#voluntariat"]},
-    ]
+# Títulos que son naturalmente recurrentes (clases, talleres, cursos periódicos)
+# Estos siempre se generarán como eventos recurrentes.
+TITULOS_RECURRENTES = {
+    "Clase de natación",
+    "Yoga al amanecer",
+    "Clase de pilates al aire libre",
+    "Clase de zumba",
+    "Clase de artes marciales",
+    "Clase de cerámica",
+    "Club de lectura",
+    "Taller de escritura creativa",
+    "Taller de percusión",
+    "Taller de guitarra",
+    "Curso de fotografía",
+    "Curso de idiomas",
+    "Curso de informática básica",
+    "Curso de defensa personal",
+    "Taller de jardinería urbana",
+    "Taller de huerto ecológico",
+    "Taller de costura creativa",
+    "Sardanas en la plaza",
+    "Cuentacuentos",
+    "Taller de robótica infantil",
+    "Circuito de crossfit",
+    "Taller de botánica",
 }
 
+CATEGORIAS = [
+    {"id": 1, "slug": "cultura"},
+    {"id": 2, "slug": "deportes"},
+    {"id": 3, "slug": "ocio"},
+    {"id": 4, "slug": "infantil"},
+    {"id": 5, "slug": "formacion"},
+    {"id": 6, "slug": "gastronomia"},
+    {"id": 7, "slug": "musica"},
+    {"id": 8, "slug": "naturaleza"}
+]
 
-def generate_id_unico(titulo: str, fecha: date, ciudad_id: int) -> str:
+SLUG_TO_ID = {cat["slug"]: cat["id"] for cat in CATEGORIAS}
+
+
+# =============================================================================
+# CLIENTE OPENAI PARA EMBEDDINGS
+# =============================================================================
+
+openai_client: Optional[AsyncOpenAI] = None
+
+
+def get_openai_client() -> AsyncOpenAI:
+    """Obtiene el cliente OpenAI singleton."""
+    global openai_client
+    if openai_client is None:
+        openai_client = AsyncOpenAI(api_key=settings.openai_api_key)
+    return openai_client
+
+
+async def validate_openai_api_key() -> bool:
+    """
+    Valida que la API key de OpenAI esté configurada y funcione.
+    Hace una llamada mínima de prueba antes de generar embeddings masivos.
+    Retorna True si todo OK, False si falla.
+    """
+    api_key = settings.openai_api_key
+    if not api_key or api_key.strip() == "":
+        print("\n" + "!" * 60)
+        print("ERROR: OPENAI_API_KEY no está configurada.")
+        print("Configúrala en .env o como variable de entorno.")
+        print("!" * 60)
+        return False
+
+    print("\nValidando API key de OpenAI...")
+    try:
+        client = get_openai_client()
+        response = await client.embeddings.create(
+            model="text-embedding-3-small",
+            input="test"
+        )
+        if response.data and len(response.data[0].embedding) > 0:
+            print("  -> API key válida (test embedding OK)")
+            return True
+        else:
+            print("  -> ERROR: respuesta vacía de OpenAI")
+            return False
+    except Exception as e:
+        print("\n" + "!" * 60)
+        print(f"ERROR: No se pudo conectar a OpenAI: {e}")
+        print("Verifica tu OPENAI_API_KEY y tu conexión a internet.")
+        print("!" * 60)
+        return False
+
+
+async def generate_embedding(text: str) -> List[float]:
+    """Genera un embedding para un texto usando OpenAI."""
+    client = get_openai_client()
+    
+    try:
+        response = await client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        print(f"Error generando embedding: {e}")
+        return []
+
+
+async def generate_embeddings_batch(texts: List[str]) -> List[List[float]]:
+    """Genera embeddings en batch para optimizar llamadas a OpenAI."""
+    client = get_openai_client()
+    
+    try:
+        response = await client.embeddings.create(
+            model="text-embedding-3-small",
+            input=texts
+        )
+        return [item.embedding for item in response.data]
+    except Exception as e:
+        print(f"Error generando embeddings en batch: {e}")
+        return [[] for _ in texts]
+
+
+# =============================================================================
+# GENERADOR DE IDs ÚNICOS
+# =============================================================================
+
+def generate_id_unico(titulo: str, fecha: date, cp: str, index: int) -> str:
     """Genera un ID único para un evento."""
-    data = f"{titulo}{fecha.isoformat()}{ciudad_id}"
+    data = f"{titulo}{fecha.isoformat()}{cp}{index}{random.randint(1000, 9999)}"
     return hashlib.sha256(data.encode()).hexdigest()
 
 
-def generate_fake_events(num_events_per_city: int = 25) -> List[Dict[str, Any]]:
-    """Genera eventos fake."""
+# =============================================================================
+# GENERADOR DE RECURRENCIA
+# =============================================================================
+
+def generate_recurrencia_json(fecha_inicio: date) -> Dict[str, Any]:
+    """
+    Genera un JSON de recurrencia conforme a docs/Data.md.
+    Incluye tipo, intervalo, dias_semana, meses_activos y finalizacion.
+    """
+    tipos_recurrencia = [
+        {
+            "tipo": "semanal",
+            "intervalo": 1,
+            "dias": random.sample(
+                ["lunes", "martes", "miercoles", "jueves", "viernes"],
+                k=random.randint(1, 2)
+            )
+        },
+        {
+            "tipo": "semanal",
+            "intervalo": 2,  # quincenal = semanal con intervalo 2
+            "dias": [random.choice(["sabado", "domingo"])]
+        },
+        {
+            "tipo": "semanal",
+            "intervalo": 1,
+            "dias": [random.choice(["sabado", "domingo"])]
+        }
+    ]
+
+    recurrencia = random.choice(tipos_recurrencia)
+    fecha_fin = fecha_inicio + timedelta(days=DIAS_RANGO_EVENTOS)
+
+    hora_inicio_h = random.randint(9, 19)
+    hora_fin_h = random.randint(hora_inicio_h + 1, min(hora_inicio_h + 3, 22))
+    hora_inicio = f"{hora_inicio_h:02d}:00"
+    hora_fin = f"{hora_fin_h:02d}:00"
+
+    regla: Dict[str, Any] = {
+        "dias_semana": recurrencia["dias"],
+        "finalizacion": {
+            "tipo": "fecha",
+            "valor": fecha_fin.isoformat()
+        }
+    }
+
+    # Añadir meses_activos en ~40% de los casos (como indica docs/Data.md)
+    if random.random() < 0.4:
+        mes_inicio = fecha_inicio.month
+        meses = sorted(set(
+            [(mes_inicio + i - 1) % 12 + 1 for i in range(random.randint(2, 4))]
+        ))
+        regla["meses_activos"] = meses
+
+    return {
+        "tipo": recurrencia["tipo"],
+        "intervalo": recurrencia["intervalo"],
+        "regla": regla,
+        "horarios": [{
+            "inicio": hora_inicio,
+            "fin": hora_fin
+        }]
+    }
+
+
+# =============================================================================
+# GENERADOR DE EVENTOS (SIN DUPLICADOS)
+# =============================================================================
+
+def _build_unique_combos(
+    cp: str,
+    poblacion_data: Dict[str, Any]
+) -> List[Tuple[Dict, str, Dict]]:
+    """
+    Construye todas las combinaciones únicas (plantilla, categoría, lugar)
+    para una población. Deduplica por titulo_es para que cada título
+    aparezca como máximo una vez por ciudad.
+    """
+    # Combinar todos los lugares disponibles
+    lugares = (
+        poblacion_data["lugares_publicos"] +
+        poblacion_data["lugares_privados"]
+    )
+    for asoc in ASOCIACIONES:
+        if cp in asoc.get("poblaciones", []):
+            lugares.append({
+                "nombre": asoc["nombre"],
+                "direccion": f"Varies localitzacions - {poblacion_data['nombre']}",
+                "tipo": asoc["tipo"],
+                "organizador": asoc["organizador"],
+                "web": asoc.get("web"),
+                "categorias_tipicas": asoc["categorias_tipicas"]
+            })
+
+    # Agrupar por título: para cada título, guardar todas las opciones
+    # de (plantilla, categoría, [lugares posibles])
+    titulo_map: Dict[str, Dict[str, Any]] = {}
+
+    for lugar in lugares:
+        for cat_slug in lugar.get("categorias_tipicas", []):
+            if cat_slug not in EVENTOS_PLANTILLAS:
+                continue
+            for plantilla in EVENTOS_PLANTILLAS[cat_slug]:
+                titulo = plantilla["titulo_es"]
+                if titulo not in titulo_map:
+                    titulo_map[titulo] = {
+                        "plantilla": plantilla,
+                        "categoria": cat_slug,
+                        "lugares": []
+                    }
+                titulo_map[titulo]["lugares"].append(lugar)
+
+    # Para cada título único, elegir un lugar al azar → 1 combo por título
+    combos = []
+    for titulo, data in titulo_map.items():
+        lugar = random.choice(data["lugares"])
+        combos.append((data["plantilla"], data["categoria"], lugar))
+
+    random.shuffle(combos)
+    return combos
+
+
+def generate_fake_events() -> List[Dict[str, Any]]:
+    """
+    Genera eventos fake para Malgrat y Blanes.
+    Cada título aparece como máximo UNA VEZ por ciudad (cero duplicados).
+    Los eventos naturalmente recurrentes usan Recurrencia_JSON.
+    """
     eventos = []
-    fecha_inicio = datetime.now().date()
-    
-    for ciudad in CIUDADES:
-        cp_info = next(cp for cp in CODIGOS_POSTALES if cp["ciudad_id"] == ciudad["id"])
-        
-        for i in range(num_events_per_city):
-            # Seleccionar categoría aleatoria
-            categoria = random.choice(CATEGORIAS)
-            slug = categoria["slug"]
-            
-            # Seleccionar template de evento
-            if slug in EVENTOS_TEMPLATES:
-                template = random.choice(EVENTOS_TEMPLATES[slug])
-            else:
-                template = random.choice(EVENTOS_TEMPLATES["ocio"])
-            
-            # Generar fecha aleatoria (próximos 60 días)
-            dias_adelante = random.randint(0, 60)
-            fecha_evento = fecha_inicio + timedelta(days=dias_adelante)
-            
+    fecha_base = datetime.now().date()
+
+    for cp, poblacion_data in POBLACIONES.items():
+        print(f"\nGenerando eventos para {poblacion_data['nombre']} ({cp})...")
+
+        # Obtener combinaciones únicas (titulo → 1 lugar)
+        combos = _build_unique_combos(cp, poblacion_data)
+        seleccionados = combos[:EVENTOS_POR_POBLACION]
+
+        print(f"  Combinaciones únicas disponibles: {len(combos)}")
+        print(f"  Seleccionados: {len(seleccionados)}")
+
+        for idx, (plantilla, categoria_slug, lugar) in enumerate(seleccionados):
+            # Fecha aleatoria en el rango
+            dias_adelante = random.randint(1, DIAS_RANGO_EVENTOS)
+            fecha_evento = fecha_base + timedelta(days=dias_adelante)
+
+            # Decidir si es recurrente:
+            # - Títulos en TITULOS_RECURRENTES → siempre recurrente
+            # - Resto → probabilidad PORCENTAJE_RECURRENTES_BASE
+            es_recurrente = (
+                plantilla["titulo_es"] in TITULOS_RECURRENTES
+                or random.random() < PORCENTAJE_RECURRENTES_BASE
+            )
+
             # Generar ID único
-            id_unico = generate_id_unico(template["titulo_es"], fecha_evento, ciudad["id"])
-            
-            # Precio (60% gratuitos, 40% de pago)
-            es_gratuito = random.random() < 0.6
-            precio = None if es_gratuito else round(random.uniform(5, 50), 2)
-            
-            # Hora
-            hora_inicio = f"{random.randint(9, 21):02d}:{random.choice(['00', '30'])}:00"
-            hora_fin = f"{random.randint(10, 23):02d}:{random.choice(['00', '30'])}:00"
-            
-            # Descripción
-            desc_corta_es = f"Evento de {categoria['nombre_es'].lower()} en {ciudad['nombre']}"
-            desc_corta_cat = f"Esdeveniment de {categoria['nombre_cat'].lower()} a {ciudad['nombre']}"
-            
+            id_unico = generate_id_unico(
+                plantilla["titulo_es"], fecha_evento, cp, idx
+            )
+
+            # Precio (70% gratuitos públicos, 80% asociaciones, 30% privados)
+            if lugar["tipo"] == "PUBLICO":
+                es_gratuito = random.random() < 0.7
+            elif lugar["tipo"] == "ASOCIACION":
+                es_gratuito = random.random() < 0.8
+            else:
+                es_gratuito = random.random() < 0.3
+
+            precio = None if es_gratuito else round(random.uniform(5, 45), 2)
+
+            # Horarios: coherencia entre columnas DB y JSON
+            if es_recurrente:
+                recurrencia_json = generate_recurrencia_json(fecha_evento)
+                hora_inicio = recurrencia_json["horarios"][0]["inicio"]
+                hora_fin = recurrencia_json["horarios"][0]["fin"]
+                fecha_fin = fecha_evento + timedelta(days=DIAS_RANGO_EVENTOS)
+            else:
+                hora_inicio_h = random.randint(9, 20)
+                hora_fin_h = min(hora_inicio_h + random.randint(1, 3), 23)
+                hora_inicio = f"{hora_inicio_h:02d}:{random.choice(['00', '30'])}:00"
+                hora_fin = f"{hora_fin_h:02d}:{random.choice(['00', '30'])}:00"
+                recurrencia_json = None
+                fecha_fin = fecha_evento
+
+            # Título con ubicación
+            titulo_es = f"{plantilla['titulo_es']} - {poblacion_data['nombre']}"
+            titulo_cat = f"{plantilla['titulo_cat']} - {poblacion_data['nombre']}"
+
+            # Descripción con organizador y lugar
+            desc_es = f"{plantilla['desc_es']} Organizado por {lugar['organizador']} en {lugar['nombre']}."
+            desc_cat = f"{plantilla['desc_cat']} Organitzat per {lugar['organizador']} a {lugar['nombre']}."
+
             evento = {
                 "id_unico": id_unico,
-                "titulo_es": f"{template['titulo_es']} - {ciudad['nombre']}",
-                "titulo_cat": f"{template['titulo_cat']} - {ciudad['nombre']}",
-                "desc_corta_es": desc_corta_es,
-                "desc_corta_cat": desc_corta_cat,
-                "cp_evento": cp_info["cp"],
-                "poblacion": ciudad["nombre"],
-                "lat": cp_info["lat"] + random.uniform(-0.01, 0.01),
-                "lng": cp_info["lng"] + random.uniform(-0.01, 0.01),
+                "titulo_es": titulo_es,
+                "titulo_cat": titulo_cat,
+                "desc_es": desc_es,
+                "desc_cat": desc_cat,
+                "cp_evento": cp,
+                "poblacion": poblacion_data["nombre"],
+                "lugar_nombre": lugar["nombre"],
+                "direccion": lugar.get("direccion"),
+                "lat": poblacion_data["lat"] + random.uniform(-0.005, 0.005),
+                "lng": poblacion_data["lng"] + random.uniform(-0.005, 0.005),
+                "tipo_organizador": lugar["tipo"],
+                "organizador_nombre": lugar["organizador"],
+                "organizador_web": lugar.get("web"),
                 "fecha_inicio": fecha_evento,
-                "fecha_fin": fecha_evento,
+                "fecha_fin": fecha_fin,
                 "hora_inicio": hora_inicio,
                 "hora_fin": hora_fin,
+                "es_recurrente": es_recurrente,
+                "recurrencia_json": json.dumps(recurrencia_json) if recurrencia_json else None,
                 "es_gratuito": es_gratuito,
                 "precio": precio,
-                "tags_es": json.dumps(template["tags_es"]),
-                "tags_cat": json.dumps(template["tags_cat"]),
-                "categoria_id": categoria["id"],
-                "ciudad_id": ciudad["id"]
+                "tags_es": plantilla["tags_es"],
+                "tags_cat": plantilla["tags_cat"],
+                "categoria_slug": categoria_slug,
+                "categoria_id": SLUG_TO_ID.get(categoria_slug, 3)
             }
-            
+
             eventos.append(evento)
-    
+
+        print(f"  -> {len(seleccionados)} eventos generados (todos únicos)")
+
     return eventos
 
 
-async def insert_data(db: DatabaseService):
-    """Inserta datos fake en la base de datos."""
-    print("Insertando ciudades...")
-    for ciudad in CIUDADES:
+# =============================================================================
+# GENERADOR DE EMBEDDINGS PARA EVENTOS
+# =============================================================================
+
+def build_embedding_text(evento: Dict[str, Any], idioma: str) -> str:
+    """
+    Construye el texto combinado para el embedding de un evento.
+    Incluye: título + descripción (truncada) + tags + categoría.
+    Esto permite que el embedding capture TODO el contenido relevante del evento.
+    """
+    if idioma == "es":
+        titulo = evento.get("titulo_es", "")
+        desc = evento.get("desc_es", "")[:300]  # Truncar descripción a 300 chars
+        tags = " ".join(evento.get("tags_es", []))
+    else:
+        titulo = evento.get("titulo_cat", "")
+        desc = evento.get("desc_cat", "")[:300]
+        tags = " ".join(evento.get("tags_cat", []))
+    
+    # Obtener nombre de categoría
+    categoria_slug = evento.get("categoria_slug", "")
+    categoria_nombre = {
+        "cultura": "Cultura" if idioma == "es" else "Cultura",
+        "deportes": "Deportes" if idioma == "es" else "Esports",
+        "ocio": "Ocio" if idioma == "es" else "Oci",
+        "infantil": "Infantil" if idioma == "es" else "Infantil",
+        "formacion": "Formación" if idioma == "es" else "Formació",
+        "gastronomia": "Gastronomía" if idioma == "es" else "Gastronomia",
+        "musica": "Música" if idioma == "es" else "Música",
+        "naturaleza": "Naturaleza" if idioma == "es" else "Naturalesa"
+    }.get(categoria_slug, "")
+    
+    # Construir texto combinado
+    # Formato: "TÍTULO. DESCRIPCIÓN. TAGS. CATEGORÍA"
+    parts = [titulo, desc, tags, categoria_nombre]
+    texto = ". ".join(p for p in parts if p)
+    
+    return texto
+
+
+async def add_embeddings_to_events(eventos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Añade embeddings COMBINADOS a todos los eventos.
+    El embedding incluye: título + descripción + tags + categoría.
+    Esto mejora significativamente el matching semántico.
+    """
+    print("\n" + "=" * 60)
+    print("GENERANDO EMBEDDINGS COMBINADOS CON OPENAI")
+    print("(título + descripción + tags + categoría)")
+    print("=" * 60)
+    
+    total = len(eventos)
+    batch_size = 20  # Procesar en batches de 20
+    
+    for i in range(0, total, batch_size):
+        batch = eventos[i:i + batch_size]
+        
+        # Preparar textos COMBINADOS para embedding (no solo tags)
+        texts_es = [build_embedding_text(e, "es") for e in batch]
+        texts_cat = [build_embedding_text(e, "cat") for e in batch]
+        
+        # Generar embeddings en batch
+        print(f"  Procesando batch {i // batch_size + 1}/{(total + batch_size - 1) // batch_size}...")
+        
+        embeddings_es = await generate_embeddings_batch(texts_es)
+        embeddings_cat = await generate_embeddings_batch(texts_cat)
+        
+        # Asignar embeddings a eventos
+        for j, evento in enumerate(batch):
+            evento["embedding_es"] = embeddings_es[j] if j < len(embeddings_es) else []
+            evento["embedding_cat"] = embeddings_cat[j] if j < len(embeddings_cat) else []
+        
+        # Pequeña pausa para no saturar la API
+        if i + batch_size < total:
+            await asyncio.sleep(0.5)
+    
+    print(f"  -> {total} eventos con embeddings combinados generados")
+    return eventos
+
+
+# =============================================================================
+# INSERCIÓN EN BASE DE DATOS
+# =============================================================================
+
+async def insert_base_data(db: DatabaseService):
+    """Inserta datos base (ciudades, códigos postales)."""
+    print("\nInsertando datos base...")
+    
+    # Ciudades
+    for cp, data in POBLACIONES.items():
+        ciudad_id = 1 if cp == "08380" else 5  # Malgrat=1, Blanes=5
         await db.execute_query(
             """
-            INSERT INTO CIUDADES (ID_Ciudad, Nombre, Provincia)
-            VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE Nombre=VALUES(Nombre)
+            INSERT INTO CIUDADES (ID_Ciudad, Nombre, Provincia, Latitud, Longitud)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE 
+                Nombre=VALUES(Nombre),
+                Latitud=VALUES(Latitud),
+                Longitud=VALUES(Longitud)
             """,
-            (ciudad["id"], ciudad["nombre"], ciudad["provincia"])
+            (ciudad_id, data["nombre"], data["provincia"], data["lat"], data["lng"])
         )
-    print(f"✓ {len(CIUDADES)} ciudades insertadas")
+    print("  -> Ciudades insertadas")
     
-    print("Insertando códigos postales...")
-    for cp in CODIGOS_POSTALES:
+    # Códigos postales
+    for cp, data in POBLACIONES.items():
+        ciudad_id = 1 if cp == "08380" else 5
         await db.execute_query(
             """
             INSERT INTO CODIGOS_POSTALES (CP, ID_Ciudad, Latitud, Longitud)
             VALUES (%s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE Latitud=VALUES(Latitud), Longitud=VALUES(Longitud)
+            ON DUPLICATE KEY UPDATE 
+                Latitud=VALUES(Latitud),
+                Longitud=VALUES(Longitud)
             """,
-            (cp["cp"], cp["ciudad_id"], cp["lat"], cp["lng"])
+            (cp, ciudad_id, data["lat"], data["lng"])
         )
-    print(f"✓ {len(CODIGOS_POSTALES)} códigos postales insertados")
+    print("  -> Códigos postales insertados")
+
+
+async def insert_events(db: DatabaseService, eventos: List[Dict[str, Any]]):
+    """Inserta eventos en la base de datos."""
+    print(f"\nInsertando {len(eventos)} eventos...")
     
-    print("Insertando categorías...")
-    for cat in CATEGORIAS:
-        await db.execute_query(
-            """
-            INSERT INTO CATEGORIAS (ID_Categoria, Nombre_ES, Nombre_CAT, Slug, Orden, Activo)
-            VALUES (%s, %s, %s, %s, %s, TRUE)
-            ON DUPLICATE KEY UPDATE Nombre_ES=VALUES(Nombre_ES), Nombre_CAT=VALUES(Nombre_CAT)
-            """,
-            (cat["id"], cat["nombre_es"], cat["nombre_cat"], cat["slug"], cat["orden"])
-        )
-    print(f"✓ {len(CATEGORIAS)} categorías insertadas")
+    inserted = 0
+    errors = 0
     
-    print("Generando eventos fake...")
-    eventos = generate_fake_events(25)
-    print(f"✓ {len(eventos)} eventos generados")
-    
-    print("Insertando eventos...")
     for evento in eventos:
-        # Insertar evento
-        await db.execute_query(
-            """
-            INSERT INTO EVENTOS_MASTER (
-                ID_Unico_Evento, Metodo_Ingesta, ID_Usuario_Carga, Fuente_ID,
-                ID_Ciudad, CP_Evento, Poblacion_Nombre, Lugar_Nombre,
-                Idioma_Origen, Titulo_ES, Titulo_CAT, Desc_Larga_ES, Desc_Larga_CAT,
-                Tags_ES, Tags_CAT, Es_Gratuito, Precio_Euros, Requiere_Inscripcion, Estado
-            ) VALUES (%s, 'MANUAL', 'fake_data_generator', 'URL_ESTRUCTURAL', %s, %s, %s, 'Lugar del evento',
-                     'es', %s, %s, %s, %s, %s, %s, %s, %s, FALSE, 'ACTIVO')
-            ON DUPLICATE KEY UPDATE Titulo_ES=VALUES(Titulo_ES)
-            """,
-            (
-                evento["id_unico"],
-                evento["ciudad_id"], evento["cp_evento"], evento["poblacion"],
-                evento["titulo_es"], evento["titulo_cat"],
-                evento["desc_corta_es"], evento["desc_corta_cat"],
-                evento["tags_es"], evento["tags_cat"],
-                evento["es_gratuito"], evento["precio"]
+        try:
+            # Insertar evento principal
+            await db.execute_query(
+                """
+                INSERT INTO EVENTOS_MASTER (
+                    ID_Unico_Evento, Metodo_Ingesta, ID_Usuario_Carga, Fuente_ID,
+                    CP_Evento, Poblacion_Nombre, Lugar_Nombre, Direccion_Fisica,
+                    Coordenadas_JSON,
+                    Tipo_Organizador, Organizador_Nombre, Organizador_Web,
+                    Idioma_Origen, Titulo_ES, Titulo_CAT, 
+                    Desc_Larga_ES, Desc_Larga_CAT,
+                    Tags_ES, Tags_CAT,
+                    Tags_Embedding_ES, Tags_Embedding_CAT,
+                    Es_Gratuito, Precio_Euros, Requiere_Inscripcion, Estado
+                ) VALUES (
+                    %s, 'MANUAL', 'fake_data_generator_v2', 'URL_ESTRUCTURAL',
+                    %s, %s, %s, %s,
+                    %s,
+                    %s, %s, %s,
+                    'es', %s, %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s,
+                    %s, %s, FALSE, 'ACTIVO'
+                )
+                ON DUPLICATE KEY UPDATE 
+                    Titulo_ES=VALUES(Titulo_ES),
+                    Tags_Embedding_ES=VALUES(Tags_Embedding_ES),
+                    Tags_Embedding_CAT=VALUES(Tags_Embedding_CAT)
+                """,
+                (
+                    evento["id_unico"],
+                    evento["cp_evento"],
+                    evento["poblacion"],
+                    evento["lugar_nombre"],
+                    evento.get("direccion"),
+                    json.dumps({"lat": evento["lat"], "lng": evento["lng"]}),
+                    evento["tipo_organizador"],
+                    evento["organizador_nombre"],
+                    evento.get("organizador_web"),
+                    evento["titulo_es"],
+                    evento["titulo_cat"],
+                    evento["desc_es"],
+                    evento["desc_cat"],
+                    json.dumps(evento["tags_es"]),
+                    json.dumps(evento["tags_cat"]),
+                    json.dumps(evento["embedding_es"]) if evento.get("embedding_es") else None,
+                    json.dumps(evento["embedding_cat"]) if evento.get("embedding_cat") else None,
+                    evento["es_gratuito"],
+                    evento["precio"]
+                )
             )
-        )
-        
-        # Insertar horario
-        await db.execute_query(
-            """
-            INSERT INTO EVENTO_HORARIOS (
-                ID_Unico_Evento, Fecha_Inicio, Fecha_Fin, Hora_Inicio, Hora_Fin
-            ) VALUES (%s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE Fecha_Inicio=VALUES(Fecha_Inicio)
-            """,
-            (
-                evento["id_unico"], evento["fecha_inicio"], evento["fecha_fin"],
-                evento["hora_inicio"], evento["hora_fin"]
+            
+            # Insertar horario
+            await db.execute_query(
+                """
+                INSERT INTO EVENTO_HORARIOS (
+                    ID_Unico_Evento, Fecha_Inicio, Fecha_Fin, 
+                    Hora_Inicio, Hora_Fin,
+                    Es_Recurrente, Recurrencia_JSON
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE 
+                    Fecha_Inicio=VALUES(Fecha_Inicio),
+                    Es_Recurrente=VALUES(Es_Recurrente)
+                """,
+                (
+                    evento["id_unico"],
+                    evento["fecha_inicio"],
+                    evento["fecha_fin"],
+                    evento["hora_inicio"],
+                    evento["hora_fin"],
+                    evento["es_recurrente"],
+                    evento.get("recurrencia_json")
+                )
             )
-        )
-        
-        # Insertar relación con categoría
-        await db.execute_query(
-            """
-            INSERT INTO EVENTO_CATEGORIAS (ID_Unico_Evento, ID_Categoria)
-            VALUES (%s, %s)
-            ON DUPLICATE KEY UPDATE ID_Categoria=VALUES(ID_Categoria)
-            """,
-            (evento["id_unico"], evento["categoria_id"])
-        )
+            
+            # Insertar relación con categoría
+            await db.execute_query(
+                """
+                INSERT INTO EVENTO_CATEGORIAS (ID_Unico_Evento, ID_Categoria)
+                VALUES (%s, %s)
+                ON DUPLICATE KEY UPDATE ID_Categoria=VALUES(ID_Categoria)
+                """,
+                (evento["id_unico"], evento["categoria_id"])
+            )
+            
+            inserted += 1
+            
+        except Exception as e:
+            errors += 1
+            print(f"  Error insertando evento {evento['id_unico'][:16]}...: {e}")
     
-    print(f"✓ {len(eventos)} eventos insertados")
+    print(f"  -> {inserted} eventos insertados, {errors} errores")
+
+
+async def verify_data(db: DatabaseService):
+    """Verifica los datos insertados."""
+    print("\n" + "=" * 60)
+    print("VERIFICACIÓN DE DATOS")
+    print("=" * 60)
     
-    # Verificar
+    # Total eventos
     result = await db.execute_query("SELECT COUNT(*) as total FROM EVENTOS_MASTER")
-    total_eventos = result[0]["total"] if result else 0
-    print(f"\n✓ Total eventos en BD: {total_eventos}")
+    total = result[0]["total"] if result else 0
+    print(f"  Total eventos: {total}")
+    
+    # Por población
+    result = await db.execute_query("""
+        SELECT Poblacion_Nombre, COUNT(*) as total 
+        FROM EVENTOS_MASTER 
+        GROUP BY Poblacion_Nombre
+    """)
+    for row in result or []:
+        print(f"    - {row['Poblacion_Nombre']}: {row['total']}")
+    
+    # Por tipo organizador
+    result = await db.execute_query("""
+        SELECT Tipo_Organizador, COUNT(*) as total 
+        FROM EVENTOS_MASTER 
+        GROUP BY Tipo_Organizador
+    """)
+    print(f"\n  Por tipo organizador:")
+    for row in result or []:
+        print(f"    - {row['Tipo_Organizador']}: {row['total']}")
+    
+    # Con embeddings
+    result = await db.execute_query("""
+        SELECT COUNT(*) as total 
+        FROM EVENTOS_MASTER 
+        WHERE Tags_Embedding_ES IS NOT NULL
+    """)
+    con_embeddings = result[0]["total"] if result else 0
+    print(f"\n  Eventos con embeddings: {con_embeddings}")
+    
+    # Recurrentes
+    result = await db.execute_query("""
+        SELECT COUNT(*) as total 
+        FROM EVENTO_HORARIOS 
+        WHERE Es_Recurrente = 1
+    """)
+    recurrentes = result[0]["total"] if result else 0
+    print(f"  Eventos recurrentes: {recurrentes}")
 
 
-async def main():
+async def clear_existing_events(db: DatabaseService):
+    """Limpia eventos existentes (opcional)."""
+    print("\nLimpiando eventos existentes...")
+    
+    await db.execute_query("DELETE FROM EVENTO_CATEGORIAS")
+    await db.execute_query("DELETE FROM EVENTO_HORARIOS")
+    await db.execute_query("DELETE FROM EVENTOS_MASTER")
+    
+    print("  -> Eventos eliminados")
+
+
+# =============================================================================
+# FUNCIÓN PRINCIPAL
+# =============================================================================
+
+async def main(clear_existing: bool = True):
     """Función principal."""
     print("=" * 60)
-    print("GENERADOR DE DATOS FAKE - Events Query API")
+    print("GENERADOR DE DATOS FAKE v3.0 (sin duplicados)")
+    print("Events Query API - Malgrat de Mar & Blanes")
     print("=" * 60)
+    print(f"\nConfiguración:")
+    print(f"  - Máx eventos por población: {EVENTOS_POR_POBLACION}")
+    print(f"  - Títulos naturalmente recurrentes: {len(TITULOS_RECURRENTES)}")
+    print(f"  - % Recurrentes base (otros): {PORCENTAJE_RECURRENTES_BASE * 100}%")
+    print(f"  - Rango de fechas: próximos {DIAS_RANGO_EVENTOS} días")
     
+    # Validar API key de OpenAI ANTES de tocar la BD
+    api_ok = await validate_openai_api_key()
+    if not api_ok:
+        print("\nABORTANDO: No se generarán datos sin una API key válida.")
+        print("Esto evita insertar eventos sin embeddings.")
+        return 1
+
     # Crear servicio de BD
     db = DatabaseService()
     
@@ -291,29 +712,50 @@ async def main():
         # Conectar
         print("\nConectando a la base de datos...")
         await db.connect()
-        print("✓ Conectado")
+        print("  -> Conectado")
         
-        # Insertar datos
-        await insert_data(db)
+        # Limpiar datos existentes (opcional)
+        if clear_existing:
+            await clear_existing_events(db)
+        
+        # Insertar datos base
+        await insert_base_data(db)
+        
+        # Generar eventos
+        print("\n" + "=" * 60)
+        print("GENERANDO EVENTOS")
+        print("=" * 60)
+        eventos = generate_fake_events()
+        print(f"\nTotal eventos generados: {len(eventos)}")
+        
+        # Generar embeddings
+        eventos = await add_embeddings_to_events(eventos)
+        
+        # Insertar en BD
+        await insert_events(db, eventos)
+        
+        # Verificar
+        await verify_data(db)
         
         print("\n" + "=" * 60)
-        print("✓ DATOS GENERADOS EXITOSAMENTE")
+        print("PROCESO COMPLETADO EXITOSAMENTE")
         print("=" * 60)
         
     except Exception as e:
-        print(f"\n✗ ERROR: {e}")
+        print(f"\nERROR: {e}")
         import traceback
         traceback.print_exc()
         return 1
     
     finally:
-        # Desconectar
         await db.disconnect()
-        print("\n✓ Desconectado")
+        print("\nDesconectado de la base de datos")
     
     return 0
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
+    # Argumento opcional para no limpiar datos existentes
+    clear = "--no-clear" not in sys.argv
+    exit_code = asyncio.run(main(clear_existing=clear))
     sys.exit(exit_code)

@@ -3,14 +3,25 @@ Aplicación principal FastAPI - Events Query API.
 """
 
 import logging
+import os
+from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
+from fastapi.responses import ORJSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.config import settings
-from app.api.routes import router
+from app.api.v1.router import router as v1_router
+from app.api.routes import router as legacy_router
 from app.services import db_service
+from app.services import image_store
+
+# Ruta al frontend compilado
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend" / "dist"
 
 # Configurar logging
 logging.basicConfig(
@@ -19,6 +30,9 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Rate limiter
+limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
@@ -40,7 +54,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"✗ Error al conectar a la base de datos: {e}")
         raise
-    
+
+    # Crear tablas si no existen (útil para Railway y despliegues sin init manual)
+    try:
+        await db_service.init_schema_if_needed()
+    except Exception as e:
+        logger.error(f"✗ Error al inicializar esquema: {e}")
+        raise
+
+    # Datos fake: solo con `python scripts/generate_fake_data.py` (no auto-seed al arrancar).
+
+    # Imágenes: tabla durable + hidratar disco efímero de Railway tras cada deploy
+    try:
+        await image_store.ensure_blob_table(db_service)
+        n = await image_store.hydrate_disk_from_db(db_service)
+        logger.info("✓ Almacén de imágenes listo (%s; +%d restauradas)",
+                    image_store.resolve_static_images_dir(), n)
+    except Exception as e:
+        logger.error(f"✗ Error preparando almacén de imágenes: {e}")
+
     # Verificar configuración de OpenAI
     if settings.openai_api_key:
         logger.info("✓ OpenAI API key configurada")
@@ -71,23 +103,90 @@ app = FastAPI(
     version=settings.app_version,
     description=settings.app_description,
     lifespan=lifespan,
-    default_response_class=ORJSONResponse,  # Usar ORJSONResponse por defecto
+    default_response_class=ORJSONResponse,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json"
 )
 
+# Configure rate limiter
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # Configurar CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"] if settings.is_development else [],  # En producción, especificar dominios
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+allowed_origins = [
+    "https://app.km0lab.com",
+    "https://www.app.km0lab.com",
+    "https://app.uat.km0lab.com",  # UAT (Vercel develop)
+    "https://km0lab.vercel.app",
+    "https://eventquery.uat.km0lab.com",
+    "https://eventquery.km0lab.com",  # legacy / prod si se reactiva
+    "http://localhost:5173",  # Vite dev
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:3000",  # React dev
+    # Capacitor Android/iOS WebView (origen nativo, sin puerto)
+    "https://localhost",
+    "capacitor://localhost",
+    "https://char-con-todos.lovable.app",  # Lovable publicado
+    "https://preview--char-con-todos.lovable.app",  # Lovable preview
+    # Preview Vercel (rama develop / commits)
+    "https://km0lab-git-develop-albertmalleu-5824s-projects.vercel.app",
+    "https://km0lab-albertmalleu-5824s-projects.vercel.app",
+]
+
+# Previews Lovable/Vercel + Vite en cualquier puerto localhost.
+allowed_origin_regex = (
+    r"https://[a-z0-9-]+--char-con-todos\.lovable\.app"
+    r"|https://km0lab(?:-[a-z0-9]+)*-albertmalleu-5824s-projects\.vercel\.app"
+    r"|http://localhost:\d+"
 )
 
-# Incluir rutas
-app.include_router(router, tags=["Events"])
+# In development, allow all origins
+if settings.environment == "development":
+    allowed_origins = ["*"]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_origin_regex=allowed_origin_regex,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+)
+
+# Include API v1 routes (production)
+app.include_router(v1_router)
+
+# Include legacy routes (backwards compatibility for PoC frontend)
+app.include_router(legacy_router, tags=["Legacy"])
+
+# Imágenes: disco (caché / volumen) + fallback IMAGENES_BLOB en MySQL
+STATIC_IMAGES_DIR = image_store.resolve_static_images_dir()
+STATIC_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+@app.get("/static/images/{event_id}/{filename}")
+async def serve_event_image(event_id: str, filename: str):
+    """Sirve una imagen; si falta en disco, la restaura desde IMAGENES_BLOB."""
+    err = image_store.validate_ids(event_id, filename)
+    if err:
+        return ORJSONResponse(status_code=404, content={"detail": "Image not found"})
+    try:
+        path = await image_store.ensure_on_disk(db_service, event_id, filename)
+    except Exception as exc:
+        logger.error("Error sirviendo imagen %s/%s: %s", event_id, filename, exc)
+        path = None
+    if not path or not path.is_file():
+        return ORJSONResponse(status_code=404, content={"detail": "Image not found"})
+    return FileResponse(
+        str(path),
+        media_type=image_store.content_type_for(filename),
+    )
+
+
+logger.info("✓ /static/images desde %s (con restore desde MySQL)", STATIC_IMAGES_DIR)
 
 # Middleware para logging de requests
 @app.middleware("http")
@@ -97,6 +196,63 @@ async def log_requests(request, call_next):
     response = await call_next(request)
     logger.info(f"← {request.method} {request.url.path} - Status: {response.status_code}")
     return response
+
+
+# ============================================
+# Servir Frontend estático (SPA)
+# ============================================
+
+# Montar assets estáticos (JS, CSS, imágenes) si el directorio existe
+if FRONTEND_DIR.exists():
+    # Montar la carpeta assets
+    assets_dir = FRONTEND_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="static-assets")
+    
+    logger.info(f"✓ Frontend estático configurado desde {FRONTEND_DIR}")
+    
+    # Ruta para la raíz - sirve index.html
+    @app.get("/")
+    async def serve_index():
+        """Sirve el index.html del frontend en la raíz."""
+        index_file = FRONTEND_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        return ORJSONResponse(status_code=404, content={"detail": "Frontend not found"})
+    
+    # Ruta catch-all para SPA - debe ir AL FINAL para no bloquear rutas de API
+    @app.get("/{full_path:path}")
+    async def serve_spa(full_path: str):
+        """
+        Sirve el frontend React para cualquier ruta no manejada por la API.
+        Permite que React Router maneje el routing del lado del cliente.
+        """
+        # Archivos estáticos de eventos (montaje más arriba); si llegan aquí, no servir SPA
+        if full_path.startswith("static/images/"):
+            return ORJSONResponse(
+                status_code=404,
+                content={"detail": "Image not found"},
+            )
+
+        # Si es una ruta de API conocida, dejar que FastAPI devuelva 404
+        api_prefixes = ("api", "docs", "redoc", "openapi.json")
+        if full_path.startswith(api_prefixes):
+            return ORJSONResponse(
+                status_code=404,
+                content={"detail": "Not Found"}
+            )
+        
+        # Para cualquier otra ruta, servir index.html (SPA)
+        index_file = FRONTEND_DIR / "index.html"
+        if index_file.exists():
+            return FileResponse(str(index_file))
+        
+        return ORJSONResponse(
+            status_code=404,
+            content={"detail": "Frontend not found"}
+        )
+else:
+    logger.warning(f"⚠ Frontend no encontrado en {FRONTEND_DIR}")
 
 
 if __name__ == "__main__":

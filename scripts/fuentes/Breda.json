@@ -1,0 +1,22 @@
+{
+  "poblacion": "Breda",
+  "codigos_postales": ["17400"],
+  "fuentes": [
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Notícies Ajuntament de Breda",
+      "url": "https://breda.cat/noticies/",
+      "prioridad": 1,
+      "tipo_contenido": "NOTICIAS",
+      "notas": "HTML público. RSS en /noticies/feed/. El CP 17400 sale del avís legal."
+    },
+    {
+      "tipo": "FUENTE_OFICIAL",
+      "nombre": "Agenda 2026 Ajuntament de Breda",
+      "url": "https://breda.cat/esdeveniments/categoria/agenda-2026/",
+      "prioridad": 1,
+      "tipo_contenido": "EVENTOS",
+      "notas": "Categoría oficial de la agenda. robots.txt no permite los query de tribe-bar-date ni ical; esta URL no los usa."
+    }
+  ]
+}

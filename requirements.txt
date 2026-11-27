@@ -25,8 +25,21 @@ pytest==7.4.3
 pytest-asyncio==0.21.1
 pytest-cov==4.1.0
 httpx==0.25.2
+beautifulsoup4==4.12.3
+lxml==5.3.0
+icalendar==5.0.11
+
+# Imágenes (persist_phase_c, dimensiones/orientación)
+Pillow>=10.4.0
+
+# Extracción de texto de PDFs (agenda Centre Cívic y similares)
+pypdf>=5.0.0
+# Renderizado de páginas PDF a imagen (extracción visual con LLM) y
+# texto con orden de columnas correcto (sort=True)
+PyMuPDF>=1.24.0
 
 # Development
 black==24.3.0
 flake8==7.0.0
 mypy==1.9.0
+slowapi==0.1.9

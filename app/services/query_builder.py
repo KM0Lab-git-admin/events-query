@@ -4,7 +4,7 @@ Servicio para construir queries SQL de forma segura.
 
 import logging
 from typing import List, Optional, Tuple
-from datetime import date
+from datetime import date, timedelta
 
 from app.models.schemas import ExtractedParameters
 
@@ -17,7 +17,8 @@ class QueryBuilder:
     def build_events_query(
         self,
         codigos_postales: List[str],
-        params: ExtractedParameters
+        params: ExtractedParameters,
+        expand_for_semantic: bool = False
     ) -> Tuple[str, tuple]:
         """
         Construye una query SQL para buscar eventos con los parámetros dados.
@@ -25,6 +26,8 @@ class QueryBuilder:
         Args:
             codigos_postales: Lista de códigos postales a buscar
             params: Parámetros extraídos de la pregunta
+            expand_for_semantic: Si True, relaja filtros (sin categoría, rango de fechas ampliado)
+                                para obtener más candidatos y que la búsqueda semántica descarte.
         
         Returns:
             Tupla (query_sql, parametros_tupla)
@@ -49,6 +52,9 @@ class QueryBuilder:
             em.Poblacion_Nombre as poblacion_nombre,
             em.Lugar_Nombre as lugar_nombre,
             em.Direccion_Fisica as direccion_completa,
+            em.ID_Recinto as id_recinto,
+            r.Nombre_Canonico as recinto_nombre_canonico,
+            r.Tipo as recinto_tipo,
             eh.Fecha_Inicio as fecha_inicio,
             eh.Fecha_Fin as fecha_fin,
             eh.Hora_Inicio as hora_inicio,
@@ -57,6 +63,7 @@ class QueryBuilder:
             em.Precio_Euros as precio_euros,
             em.Link_Entradas_Inscripcion as url_evento,
             em.Imagen_Principal_URL as url_imagen,
+            em.Fuente_URL_Original as fuente_url_original,
             CASE 
                 WHEN %s = 'es' THEN em.Tags_ES
                 ELSE em.Tags_CAT
@@ -66,10 +73,15 @@ class QueryBuilder:
                 ELSE em.Tags_Embedding_CAT
             END as tags_embedding_json,
             cp.Latitud as latitud,
-            cp.Longitud as longitud
+            cp.Longitud as longitud,
+            (SELECT c.Slug FROM EVENTO_CATEGORIAS ec
+             INNER JOIN CATEGORIAS c ON ec.ID_Categoria = c.ID_Categoria
+             WHERE ec.ID_Unico_Evento = em.ID_Unico_Evento
+             LIMIT 1) AS categoria_slug
         FROM EVENTOS_MASTER em
         INNER JOIN EVENTO_HORARIOS eh ON em.ID_Unico_Evento = eh.ID_Unico_Evento
         INNER JOIN CODIGOS_POSTALES cp ON em.CP_Evento = cp.CP
+        LEFT JOIN RECINTOS r ON em.ID_Recinto = r.ID_Recinto
         WHERE em.Estado = 'ACTIVO'
         """
         
@@ -88,31 +100,32 @@ class QueryBuilder:
             query += f" AND em.CP_Evento IN ({placeholders})"
             query_params.extend(codigos_postales)
         
-        # Filtro por fechas
+        # Filtro por fechas (siempre estricto, nunca ampliar)
         if params.fechas:
             # Fechas específicas
             placeholders = ','.join(['%s'] * len(params.fechas))
             query += f" AND eh.Fecha_Inicio IN ({placeholders})"
             query_params.extend(params.fechas)
         elif params.fecha_inicio or params.fecha_fin:
-            # Rango de fechas
-            if params.fecha_inicio:
+            # Rango de fechas (nunca ampliar: filtro temporal es estricto)
+            fecha_ini = params.fecha_inicio
+            fecha_fin = params.fecha_fin
+            if fecha_ini:
                 query += " AND eh.Fecha_Inicio >= %s"
-                query_params.append(params.fecha_inicio)
-            if params.fecha_fin:
+                query_params.append(fecha_ini)
+            if fecha_fin:
                 query += " AND eh.Fecha_Inicio <= %s"
-                query_params.append(params.fecha_fin)
+                query_params.append(fecha_fin)
         
-        # Filtro por precio
-        if params.es_gratuito is not None:
-            query += " AND em.Es_Gratuito = %s"
-            query_params.append(params.es_gratuito)
+        # Filtro por precio - solo filtrar si el usuario pidió explícitamente eventos gratuitos
+        if params.es_gratuito is True:
+            query += " AND em.Es_Gratuito = TRUE"
         elif params.precio_max is not None:
             query += " AND (em.Es_Gratuito = TRUE OR em.Precio_Euros <= %s)"
             query_params.append(params.precio_max)
         
-        # Filtro por categorías (si se especificaron)
-        if params.categorias:
+        # Filtro por categorías (omitir si expand_for_semantic: la semántica hará el ranking)
+        if params.categorias and not expand_for_semantic:
             # Subconsulta para filtrar por categorías
             placeholders = ','.join(['%s'] * len(params.categorias))
             query += f"""
@@ -128,8 +141,9 @@ class QueryBuilder:
         # Ordenar por fecha
         query += " ORDER BY eh.Fecha_Inicio ASC, eh.Hora_Inicio ASC"
         
-        # Limitar resultados (máximo 50 eventos para búsqueda semántica)
-        query += " LIMIT 50"
+        # Límite: más candidatos cuando hay búsqueda semántica para ver descartados
+        limit_val = 100 if expand_for_semantic else 50
+        query += f" LIMIT {limit_val}"
         
         logger.info(f"Query construida con {len(query_params)} parámetros")
         

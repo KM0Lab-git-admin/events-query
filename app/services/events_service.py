@@ -5,12 +5,15 @@ Orquesta todos los servicios (DB, IA, QueryBuilder) para procesar búsquedas.
 
 import json
 import logging
+import unicodedata
+from datetime import date
 from typing import List, Optional, Dict, Any
 
 from app.models.schemas import QueryRequest, QueryResponse, Evento, ExtractedParameters
 from app.services.database import db_service
 from app.services.ai_service import ai_service
 from app.services.query_builder import query_builder
+from app.services.analysis_service import analysis_service
 
 logger = logging.getLogger(__name__)
 
@@ -34,19 +37,15 @@ class EventsService:
         params = await ai_service.extract_parameters(request.pregunta, request.cp_usuario)
         logger.info(f"Parámetros extraídos: {params.model_dump()}")
         
-        # Paso 2: Calcular códigos postales en el radio especificado
-        if params.radio_km:
-            codigos_postales = await db_service.get_codigos_postales_in_radius(
-                request.cp_usuario,
-                params.radio_km
-            )
-            logger.info(f"CPs en radio {params.radio_km}km: {len(codigos_postales)} encontrados")
-        else:
-            # Solo el CP del usuario
-            codigos_postales = [request.cp_usuario]
+        # Paso 2: Usar SOLO el código postal del usuario (sin expandir por radio)
+        codigos_postales = [request.cp_usuario]
+        logger.info(f"Usando solo CP del usuario: {codigos_postales}")
         
-        # Paso 3: Construir query SQL
-        query, query_params = query_builder.build_events_query(codigos_postales, params)
+        # Paso 3: Construir query SQL (relajada si hay búsqueda semántica para ver descartados)
+        expand_for_semantic = bool(params.conceptos)
+        query, query_params = query_builder.build_events_query(
+            codigos_postales, params, expand_for_semantic=expand_for_semantic
+        )
         
         # Paso 4: Ejecutar query (pre-filtrado)
         eventos_raw = await db_service.execute_query(query, query_params)
@@ -57,11 +56,16 @@ class EventsService:
             eventos_raw,
             params.conceptos,
             params.idioma,
-            request.cp_usuario
+            request.cp_usuario,
+            categorias_solicitadas=params.categorias or []
         )
         
-        # Paso 6: Convertir a modelos Pydantic
-        eventos = await self._convert_to_eventos(eventos_filtrados, request.cp_usuario)
+        # Paso 5b: Post-filtro temporal (descartar eventos fuera del rango)
+        eventos_temporales = self._filtrar_por_fechas(eventos_filtrados, params)
+        logger.info(f"Post-filtro temporal: {len(eventos_temporales)} eventos (de {len(eventos_filtrados)})")
+        
+        # Paso 6: Convertir a modelos Pydantic y asignar nivel_coincidencia
+        eventos = await self._convert_to_eventos(eventos_temporales, request.cp_usuario)
         logger.info(f"Eventos finales: {len(eventos)}")
         
         # Paso 7: Generar respuesta en lenguaje natural
@@ -81,84 +85,216 @@ class EventsService:
         
         # Añadir debug info si se solicita
         if request.debug:
+            # Análisis detallado de eventos
+            analisis_detallado = []
+            if eventos_raw:
+                # Usar conceptos si existen, sino usar la pregunta completa
+                conceptos_para_analisis = params.conceptos if params.conceptos else [request.pregunta]
+                conceptos_text = " ".join(conceptos_para_analisis)
+                pregunta_embedding = await ai_service.generate_embedding(conceptos_text)
+                
+                # Analizar todos los eventos (incluso los que no pasaron)
+                analisis_detallado = await analysis_service.analyze_batch(
+                    eventos_raw[:20],  # Limitar a 20 para no saturar
+                    pregunta_embedding,
+                    conceptos_para_analisis,
+                    umbral=0.4
+                )
+            
             response.debug_info = {
                 "parametros_extraidos": params.model_dump(),
                 "codigos_postales": codigos_postales,
                 "sql_query": query,
                 "sql_params": query_params,
                 "eventos_pre_filtrado": len(eventos_raw),
-                "eventos_post_semantica": len(eventos_filtrados)
+                "eventos_post_semantica": len(eventos_filtrados),
+                "analisis_detallado": analisis_detallado
             }
         
         return response
     
+    def _parse_fecha_inicio(self, ev: Dict[str, Any]) -> Optional[date]:
+        """Extrae fecha_inicio de un evento como date o None."""
+        fi = ev.get('fecha_inicio')
+        if not fi:
+            return None
+        if hasattr(fi, 'date'):
+            return fi.date()
+        if isinstance(fi, str) and len(fi) >= 10:
+            return date.fromisoformat(fi[:10])
+        return None
+
+    def _parse_fecha_fin(self, ev: Dict[str, Any]) -> Optional[date]:
+        """Extrae fecha_fin de un evento como date o None."""
+        ff = ev.get('fecha_fin')
+        if not ff:
+            return None
+        if hasattr(ff, 'date'):
+            return ff.date()
+        if isinstance(ff, str) and len(ff) >= 10:
+            return date.fromisoformat(ff[:10])
+        return None
+
+    def _filtrar_por_fechas(
+        self,
+        eventos: List[Dict[str, Any]],
+        params: ExtractedParameters
+    ) -> List[Dict[str, Any]]:
+        """Descartar eventos ya terminados y fuera del rango solicitado."""
+        hoy = date.today()
+        resultado = []
+
+        for ev in eventos:
+            fi = self._parse_fecha_inicio(ev)
+            ff = self._parse_fecha_fin(ev)
+            # Descartar si el evento ya terminó (fecha_fin < hoy)
+            if ff and ff < hoy:
+                continue
+            # Si fecha_inicio es pasada pero fecha_fin es futura (evento recurrente/activo), mantener
+            if fi and fi < hoy:
+                if ff and ff >= hoy:
+                    resultado.append(ev)
+                    continue
+                continue
+            # Si no hay fecha inicio, mantener (eventos sin fecha no se descartan por antigüedad)
+            if not fi:
+                resultado.append(ev)
+                continue
+
+            # Si hay rango de fechas en params, filtrar por él
+            if params.fechas or params.fecha_inicio or params.fecha_fin:
+                fechas_validas = set()
+                if params.fechas:
+                    for f in params.fechas:
+                        fechas_validas.add(f if isinstance(f, date) else date.fromisoformat(str(f)))
+                elif params.fecha_inicio or params.fecha_fin:
+                    from datetime import timedelta
+                    ini = params.fecha_inicio or params.fecha_fin
+                    fin = params.fecha_fin or params.fecha_inicio
+                    if isinstance(ini, str):
+                        ini = date.fromisoformat(ini)
+                    if isinstance(fin, str):
+                        fin = date.fromisoformat(fin)
+                    d = ini
+                    while d <= fin:
+                        fechas_validas.add(d)
+                        d += timedelta(days=1)
+                if fechas_validas and fi not in fechas_validas:
+                    continue
+            resultado.append(ev)
+
+        return resultado
+    
+    def _normalizar_categoria_a_slug(self, nombre: str) -> str:
+        """Convierte nombre de categoría (ej. 'Cultura', 'Gastronomía') a slug (cultura, gastronomia)."""
+        if not nombre or not isinstance(nombre, str):
+            return ""
+        s = nombre.strip().lower()
+        s = "".join(c for c in s if c.isalnum() or c in " _")
+        s = s.replace(" ", "_")
+        # Normalizar acentos a ASCII para coincidir con slugs de BD
+        s = unicodedata.normalize("NFD", s)
+        s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+        return s or ""
+
     async def _semantic_search(
         self,
         eventos_raw: List[Dict[str, Any]],
         conceptos: List[str],
         idioma: str,
-        cp_usuario: str
+        cp_usuario: str,
+        categorias_solicitadas: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Realiza búsqueda semántica sobre los eventos pre-filtrados.
+        Si la categoría del evento coincide con una categoría solicitada, el score
+        se refuerza para superar el umbral (categoría tiene más peso que tags).
         
         Args:
             eventos_raw: Eventos del pre-filtrado SQL
             conceptos: Conceptos para búsqueda semántica
             idioma: Idioma ('es' o 'ca')
             cp_usuario: Código postal del usuario
+            categorias_solicitadas: Categorías extraídas de la pregunta (ej. ['Cultura'])
         
         Returns:
-            Lista de eventos filtrados por similitud semántica
+            Lista de eventos con score, ordenados por similitud
         """
         if not conceptos or not eventos_raw:
             return eventos_raw
+        
+        # Slugs de categorías solicitadas (ej. ['Cultura'] -> {'cultura'})
+        slugs_solicitados = set()
+        for cat in (categorias_solicitadas or []):
+            slug = self._normalizar_categoria_a_slug(cat)
+            if slug:
+                slugs_solicitados.add(slug)
         
         # Generar embedding de los conceptos del usuario
         conceptos_text = " ".join(conceptos)
         user_embedding = await ai_service.generate_embedding(conceptos_text)
         
-        # Calcular similitud con cada evento
+        # Cache de embeddings por categoría (evita llamadas repetidas)
+        slug_to_expanded = {
+            "cultura": "cultura arte museo exposición concierto",
+            "deportes": "deportes ejercicio actividad física",
+            "ocio": "ocio entretenimiento diversión",
+            "infantil": "infantil niños familia",
+            "formacion": "formación taller curso aprendizaje",
+            "gastronomia": "gastronomía comida restaurante culinaria",
+            "musica": "música concierto musical",
+            "naturaleza": "naturaleza jardinería plantas aire libre"
+        }
+        cat_embeddings_cache: Dict[str, List[float]] = {}
+        
+        # Calcular similitud con cada evento (categoría 40%, tags 60%)
         eventos_con_score = []
         for evento in eventos_raw:
-            # Obtener embedding del evento según idioma
             embedding_json = evento.get('tags_embedding_json')
+            sim_tags = 0.3  # default si no hay embedding
             
-            if not embedding_json:
-                # Si no hay embedding, asignar score bajo
-                evento['similitud_score'] = 0.3
-                eventos_con_score.append(evento)
-                continue
+            if embedding_json:
+                try:
+                    if isinstance(embedding_json, str):
+                        evento_embedding = json.loads(embedding_json)
+                    else:
+                        evento_embedding = embedding_json
+                    sim_tags = ai_service.cosine_similarity(user_embedding, evento_embedding)
+                except Exception as e:
+                    logger.warning(f"Error al procesar embedding del evento {evento.get('id_unico_evento')}: {e}")
             
-            try:
-                # Parsear embedding
-                if isinstance(embedding_json, str):
-                    evento_embedding = json.loads(embedding_json)
-                else:
-                    evento_embedding = embedding_json
-                
-                # Calcular similitud coseno
-                similitud = ai_service.cosine_similarity(user_embedding, evento_embedding)
-                evento['similitud_score'] = similitud
-                
-                eventos_con_score.append(evento)
-                
-            except Exception as e:
-                logger.warning(f"Error al procesar embedding del evento {evento.get('id_unico_evento')}: {e}")
-                evento['similitud_score'] = 0.3
-                eventos_con_score.append(evento)
+            # Similitud por categoría de producto (peso 40%)
+            sim_cat = 0.0
+            cat_slug = evento.get('categoria_slug')
+            if cat_slug:
+                if cat_slug not in cat_embeddings_cache:
+                    cat_text = slug_to_expanded.get(cat_slug, cat_slug)
+                    cat_embeddings_cache[cat_slug] = await ai_service.generate_embedding(cat_text)
+                cat_embedding = cat_embeddings_cache[cat_slug]
+                sim_cat = ai_service.cosine_similarity(user_embedding, cat_embedding)
+            
+            # Combinar: 40% categoría, 60% tags (categoría más relevante que tags)
+            if cat_slug:
+                score = 0.4 * sim_cat + 0.6 * sim_tags
+            else:
+                score = sim_tags
+            
+            # Refuerzo si categoría solicitada coincide
+            if slugs_solicitados and cat_slug in slugs_solicitados:
+                score = max(score, 0.45)
+            
+            evento['similitud_score'] = round(score, 4)
+            evento['similitud_tags'] = round(sim_tags, 4)
+            evento['similitud_categoria'] = round(sim_cat, 4)
+            eventos_con_score.append(evento)
         
-        # Filtrar por similitud mínima (0.6)
-        eventos_filtrados = [e for e in eventos_con_score if e['similitud_score'] >= 0.6]
+        # Ordenar por similitud descendente (sin filtrar por umbral)
+        # Esto permite mostrar todos los eventos: primero los que pasan el filtro, luego los que no
+        eventos_filtrados = sorted(eventos_con_score, key=lambda x: x['similitud_score'], reverse=True)
         
-        # Si no hay eventos con similitud >= 0.6, devolver los mejores 10
-        if not eventos_filtrados and eventos_con_score:
-            eventos_filtrados = sorted(eventos_con_score, key=lambda x: x['similitud_score'], reverse=True)[:10]
-        
-        # Ordenar por similitud descendente
-        eventos_filtrados.sort(key=lambda x: x['similitud_score'], reverse=True)
-        
-        logger.info(f"Búsqueda semántica: {len(eventos_filtrados)} eventos con similitud >= 0.6")
+        # Contar cuántos pasan el umbral para logging
+        eventos_que_pasan = [e for e in eventos_filtrados if e['similitud_score'] >= 0.4]
+        logger.info(f"Búsqueda semántica: {len(eventos_que_pasan)} eventos con similitud >= 0.4 de {len(eventos_filtrados)} totales")
         
         return eventos_filtrados
     
@@ -179,6 +315,8 @@ class EventsService:
         """
         eventos = []
         
+        logger.info(f"Iniciando conversion de {len(eventos_raw)} eventos raw a modelos Pydantic")
+        
         # Obtener coordenadas del usuario
         coords_usuario = await db_service.get_coordenadas_cp(cp_usuario)
         
@@ -197,42 +335,85 @@ class EventsService:
                 # Calcular distancia si hay coordenadas
                 distancia_km = None
                 if coords_usuario and evento_raw.get('latitud') and evento_raw.get('longitud'):
-                    distancia_km = self._calculate_distance(
-                        coords_usuario['lat'],
-                        coords_usuario['lng'],
-                        float(evento_raw['latitud']),
-                        float(evento_raw['longitud'])
-                    )
+                    # Convertir todos los valores a float (pueden venir como Decimal desde MySQL)
+                    lat_usuario = float(coords_usuario['lat']) if coords_usuario.get('lat') is not None else None
+                    lng_usuario = float(coords_usuario['lng']) if coords_usuario.get('lng') is not None else None
+                    lat_evento = float(evento_raw['latitud']) if evento_raw.get('latitud') is not None else None
+                    lng_evento = float(evento_raw['longitud']) if evento_raw.get('longitud') is not None else None
+                    
+                    if lat_usuario is not None and lng_usuario is not None and lat_evento is not None and lng_evento is not None:
+                        distancia_km = self._calculate_distance(
+                            lat_usuario,
+                            lng_usuario,
+                            lat_evento,
+                            lng_evento
+                        )
+                
+                # Validar campos requeridos (COMENTADO TEMPORALMENTE PARA DEBUGGING)
+                # if not evento_raw.get('id_unico_evento'):
+                #     logger.warning(f"Evento sin ID, saltando")
+                #     continue
+                # 
+                # if not evento_raw.get('titulo'):
+                #     logger.warning(f"Evento {evento_raw.get('id_unico_evento')} sin título, saltando")
+                #     continue
+                
+                # Asignar nivel_coincidencia: mayor si score >= 0.55 o (tags y categoría >= 0.5)
+                score = evento_raw.get('similitud_score', 0.0)
+                sim_tags = evento_raw.get('similitud_tags', 0.0)
+                sim_cat = evento_raw.get('similitud_categoria', 0.0)
+                if score >= 0.55 or (sim_tags >= 0.5 and sim_cat >= 0.5):
+                    nivel = "mayor"
+                elif score >= 0.40:
+                    nivel = "templada"
+                elif score >= 0.25:
+                    nivel = "baja"
+                else:
+                    nivel = "muy_poca"
                 
                 # Crear modelo Evento
                 evento = Evento(
-                    id_unico_evento=evento_raw['id_unico_evento'],
-                    titulo=evento_raw['titulo'],
+                    id_unico_evento=str(evento_raw['id_unico_evento']),
+                    titulo=str(evento_raw['titulo']),
                     descripcion_corta=evento_raw.get('descripcion_corta'),
                     descripcion_larga=evento_raw.get('descripcion_larga'),
-                    cp_evento=evento_raw['cp_evento'],
-                    poblacion_nombre=evento_raw['poblacion_nombre'],
+                    cp_evento=str(evento_raw.get('cp_evento', '')),
+                    poblacion_nombre=str(evento_raw.get('poblacion_nombre', '')),
                     lugar_nombre=evento_raw.get('lugar_nombre'),
                     direccion_completa=evento_raw.get('direccion_completa'),
-                    fecha_inicio=evento_raw['fecha_inicio'],
+                    id_recinto=int(evento_raw['id_recinto']) if evento_raw.get('id_recinto') is not None else None,
+                    recinto_nombre_canonico=evento_raw.get('recinto_nombre_canonico'),
+                    recinto_tipo=str(evento_raw['recinto_tipo']) if evento_raw.get('recinto_tipo') else None,
+                    fecha_inicio=evento_raw.get('fecha_inicio'),
                     fecha_fin=evento_raw.get('fecha_fin'),
                     hora_inicio=str(evento_raw['hora_inicio']) if evento_raw.get('hora_inicio') else None,
                     hora_fin=str(evento_raw['hora_fin']) if evento_raw.get('hora_fin') else None,
-                    es_gratuito=bool(evento_raw['es_gratuito']),
+                    es_gratuito=bool(evento_raw.get('es_gratuito', False)),
                     precio_euros=float(evento_raw['precio_euros']) if evento_raw.get('precio_euros') else None,
                     categorias=[],  # TODO: Cargar desde relación N:M
                     tags=tags,
                     url_evento=evento_raw.get('url_evento'),
                     url_imagen=evento_raw.get('url_imagen'),
+                    fuente_url_original=evento_raw.get('fuente_url_original'),
                     distancia_km=round(distancia_km, 2) if distancia_km else None,
-                    similitud_score=round(evento_raw.get('similitud_score', 0.0), 3)
+                    similitud_score=round(evento_raw.get('similitud_score', 0.0), 3),
+                    nivel_coincidencia=nivel
                 )
                 
                 eventos.append(evento)
+                logger.debug(f"Evento {evento.id_unico_evento} convertido exitosamente")
                 
             except Exception as e:
-                logger.error(f"Error al convertir evento {evento_raw.get('id_unico_evento')}: {e}")
+                error_msg = f"Error al convertir evento {evento_raw.get('id_unico_evento')}: {e}"
+                logger.error(error_msg)
+                logger.error(f"Datos del evento: {evento_raw}")
+                logger.exception("Stack trace completo:")
+                
+                logger.error(f"Tipo de error: {type(e).__name__}")
+                
                 continue
+        
+        logger.info(f"Conversion completada: {len(eventos)}/{len(eventos_raw)} eventos convertidos")
         
         return eventos
     
