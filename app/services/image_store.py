@@ -216,12 +216,27 @@ async def hydrate_disk_from_db(db) -> int:
 POSTER_MAX_WIDTH = 1600
 
 
+def _on_white(image):
+    """RGB opaco. Lo transparente se compone sobre blanco: un JPEG no tiene alfa
+    y Pillow, al convertir, rellena el hueco de negro.
+    """
+    from PIL import Image
+
+    if image.mode == "RGB":
+        return image
+    rgba = image.convert("RGBA")
+    background = Image.new("RGB", rgba.size, (255, 255, 255))
+    background.paste(rgba, mask=rgba.getchannel("A"))
+    return background
+
+
 def fit_poster(src: Path, event_id: str, filename: str, max_width: int) -> Path:
     """JPEG que cabe en `max_width` px de ancho, o el original si ya cabe.
 
     No amplía. La caché vive en `.derivatives/` y se regenera si el original
     cambia (mismo nombre, bytes nuevos). El navegador aplica la orientación
     EXIF al pintar; al reencodear hay que aplicarla aquí o el cartel gira.
+    La transparencia se pinta sobre blanco.
     """
     from PIL import Image, ImageOps
 
@@ -245,8 +260,7 @@ def fit_poster(src: Path, event_id: str, filename: str, max_width: int) -> Path:
         src_w, src_h = image.size
         if src_w <= width:
             return src
-        if image.mode != "RGB":
-            image = image.convert("RGB")
+        image = _on_white(image)
         fitted = image.resize(
             (width, max(1, round(src_h * width / src_w))),
             Image.Resampling.LANCZOS,
