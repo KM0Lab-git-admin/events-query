@@ -117,7 +117,7 @@ async def save_image(db, event_id: str, filename: str, content: bytes) -> str:
 
 
 async def delete_images(db, event_id: str) -> bool:
-    """Borra carpeta en disco y filas blob del id."""
+    """Borra carpeta en disco, derivados redimensionados y filas blob del id."""
     import shutil
 
     root = resolve_static_images_dir()
@@ -125,6 +125,10 @@ async def delete_images(db, event_id: str) -> bool:
     removed = False
     if dest.is_dir():
         shutil.rmtree(dest, ignore_errors=True)
+        removed = True
+    derivatives = root / ".derivatives" / event_id
+    if derivatives.is_dir():
+        shutil.rmtree(derivatives, ignore_errors=True)
         removed = True
     await db.execute_query(
         "DELETE FROM IMAGENES_BLOB WHERE ID_Unico=%s",
@@ -206,3 +210,49 @@ async def hydrate_disk_from_db(db) -> int:
         len(rows),
     )
     return restored
+
+
+# Tope del parámetro `w`. Por encima no aporta en un móvil y dispara la memoria.
+POSTER_MAX_WIDTH = 1600
+
+
+def fit_poster(src: Path, event_id: str, filename: str, max_width: int) -> Path:
+    """JPEG que cabe en `max_width` px de ancho, o el original si ya cabe.
+
+    No amplía. La caché vive en `.derivatives/` y se regenera si el original
+    cambia (mismo nombre, bytes nuevos). El navegador aplica la orientación
+    EXIF al pintar; al reencodear hay que aplicarla aquí o el cartel gira.
+    """
+    from PIL import Image, ImageOps
+
+    width = max(1, min(int(max_width), POSTER_MAX_WIDTH))
+    dest = (
+        resolve_static_images_dir()
+        / ".derivatives"
+        / event_id
+        / f"w{width}_{Path(filename).stem}.jpg"
+    )
+    if (
+        dest.is_file()
+        and dest.stat().st_size > 0
+        and dest.stat().st_mtime >= src.stat().st_mtime
+    ):
+        return dest
+
+    with Image.open(src) as opened:
+        image = ImageOps.exif_transpose(opened) or opened
+        image.load()
+        src_w, src_h = image.size
+        if src_w <= width:
+            return src
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        fitted = image.resize(
+            (width, max(1, round(src_h * width / src_w))),
+            Image.Resampling.LANCZOS,
+        )
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f"{dest.name}.{os.getpid()}.tmp")
+        fitted.save(tmp, format="JPEG", quality=82, optimize=True)
+        tmp.replace(dest)
+    return dest

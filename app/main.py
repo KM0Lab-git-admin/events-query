@@ -2,11 +2,12 @@
 Aplicación principal FastAPI - Events Query API.
 """
 
+import asyncio
 import logging
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -168,8 +169,22 @@ STATIC_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @app.get("/static/images/{event_id}/{filename}")
-async def serve_event_image(event_id: str, filename: str):
-    """Sirve una imagen; si falta en disco, la restaura desde IMAGENES_BLOB."""
+async def serve_event_image(
+    event_id: str,
+    filename: str,
+    w: int | None = Query(
+        default=None,
+        ge=1,
+        le=image_store.POSTER_MAX_WIDTH,
+        description="Ancho máximo en px. No amplía. Sin este parámetro se sirve el original.",
+    ),
+):
+    """Sirve una imagen; si falta en disco, la restaura desde IMAGENES_BLOB.
+
+    `w` devuelve un JPEG que cabe en ese ancho (caché en disco). La lista de
+    la Agenda lo pide al tamaño de la tarjeta; el detalle no lo manda y sigue
+    recibiendo el fichero original.
+    """
     err = image_store.validate_ids(event_id, filename)
     if err:
         return ORJSONResponse(status_code=404, content={"detail": "Image not found"})
@@ -180,9 +195,18 @@ async def serve_event_image(event_id: str, filename: str):
         path = None
     if not path or not path.is_file():
         return ORJSONResponse(status_code=404, content={"detail": "Image not found"})
+    if w is not None:
+        try:
+            path = await asyncio.to_thread(
+                image_store.fit_poster, path, event_id, filename, w
+            )
+        except Exception as exc:
+            logger.error(
+                "No se pudo reducir %s/%s a %s px: %s", event_id, filename, w, exc
+            )
     return FileResponse(
         str(path),
-        media_type=image_store.content_type_for(filename),
+        media_type=image_store.content_type_for(path.name),
     )
 
 
