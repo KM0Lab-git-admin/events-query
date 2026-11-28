@@ -71,3 +71,6 @@ dmypy.json
 
 # Ingesta: lock del cron
 scripts/.ingest.lock
+
+# Carteles reducidos: caché local, no se sube
+static/images/.derivatives/
