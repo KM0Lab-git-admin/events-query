@@ -118,6 +118,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 allowed_origins = [
     "https://app.km0lab.com",
     "https://www.app.km0lab.com",
+    "https://km0lab-prod.vercel.app",  # App de producción (dirección provisional de Vercel)
     "https://app.uat.km0lab.com",  # UAT (Vercel develop)
     "https://km0lab.vercel.app",
     "https://eventquery.uat.km0lab.com",
